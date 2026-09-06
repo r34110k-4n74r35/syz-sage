@@ -12,7 +12,17 @@ from typing import TextIO
 
 
 def terminal_width(stream: TextIO | None = None) -> int:
-    return max(24, min(110, shutil.get_terminal_size(fallback=(96, 24)).columns))
+    width = shutil.get_terminal_size(fallback=(96, 24)).columns
+    destination = stream if stream is not None else sys.stdout
+    # Progress can remain interactive on stderr when stdout is redirected.
+    # Honor an explicit COLUMNS setting, otherwise size the actual destination.
+    if not os.environ.get("COLUMNS"):
+        try:
+            if destination.isatty():
+                width = os.get_terminal_size(destination.fileno()).columns
+        except (AttributeError, OSError, ValueError):
+            pass
+    return max(24, min(110, width))
 
 
 def style(value: str, *, tone: str = "heading", stream: TextIO | None = None) -> str:
@@ -31,8 +41,8 @@ def style(value: str, *, tone: str = "heading", stream: TextIO | None = None) ->
         "tag": "1;35",
         "function": "35",
         "hash": "33",
-        "link": "4;34",
-        "date": "34",
+        "link": "4;94",
+        "date": "94",
     }
     return f"\x1b[{codes[tone]}m{value}\x1b[0m"
 
@@ -101,14 +111,16 @@ def fields(
     for label, value in rows:
         tone = tones.get(label) if tones else None
         prefix = " " * indent + f"{label}:".ljust(label_width)
-        if stacked:
+        text = safe_text(value)
+        # Long links get a dedicated, intact line for selection and copying.
+        if stacked or (tone == "link" and len(text) > terminal_width() - len(prefix)):
             print(" " * indent + style(label + ":", tone="muted"))
             paragraph(value, indent=indent + 2, tone=tone)
             continue
         lines = textwrap.wrap(
-            safe_text(value),
+            text,
             width=terminal_width() - len(prefix),
-            break_long_words=True,
+            break_long_words=False,
             break_on_hyphens=False,
         ) or [""]
         rendered = [style(line, tone=tone) if tone else line for line in lines]

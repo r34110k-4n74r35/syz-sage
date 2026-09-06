@@ -38,6 +38,7 @@ from .parsing import (
     validate_http_url,
     validate_listing_membership,
 )
+from .progress_events import ProgressCallback, progress_items, report_progress
 from .resolutions import (
     ResolutionTargets,
     resolution_identity,
@@ -760,13 +761,20 @@ def _patch_urls(fixes: Sequence[Mapping[str, Any]]) -> list[str]:
 class Database:
     """A small, migration-aware SQLite repository for syzbot data."""
 
-    def __init__(self, path: str | os.PathLike[str], *, read_only: bool = False) -> None:
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        read_only: bool = False,
+        on_progress: ProgressCallback | None = None,
+    ) -> None:
         self._path_text = os.fspath(path)
         if self._path_text != ":memory:":
             self._path_text = str(writable_path(self._path_text))
         self.path = Path(self._path_text) if self._path_text != ":memory:" else Path(":memory:")
         self._connection: sqlite3.Connection | None = None
         self._read_only = read_only
+        self._on_progress = on_progress
 
     def __enter__(self) -> Database:
         try:
@@ -831,6 +839,8 @@ class Database:
         """Open and validate the database; migrate older schemas on writable opens."""
         connection = self.connection
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        creating = version == 0
+        migration_progress = None if creating else self._on_progress
         if version > SCHEMA_VERSION:
             raise RuntimeError(
                 f"database schema {version} is newer than supported schema {SCHEMA_VERSION}"
@@ -858,6 +868,7 @@ class Database:
                     f"found {sample}{suffix}"
                 )
             try:
+                report_progress(self._on_progress, "initialize", "Creating database schema")
                 connection.executescript(_SCHEMA_V1)
             except BaseException:
                 if connection.in_transaction:
@@ -868,27 +879,29 @@ class Database:
         if version == 1:
             if self._read_only:
                 raise RuntimeError("database schema needs migration; run 'ss migrate' first")
-            location_store.migrate_v2(connection)
+            location_store.migrate_v2(connection, on_progress=migration_progress)
             version = 2
         location_store.validate_schema(connection)
         if version == 2:
             if self._read_only:
                 raise RuntimeError("database schema needs migration; run 'ss migrate' first")
-            schema_v3.migrate(connection)
+            schema_v3.migrate(connection, on_progress=migration_progress)
             version = 3
         schema_v3.validate(connection)
         if version == 3:
             if self._read_only:
                 raise RuntimeError("database schema needs migration; run 'ss migrate' first")
-            schema_v4.migrate(connection)
+            schema_v4.migrate(connection, on_progress=migration_progress)
             version = 4
         schema_v4.validate(connection)
         if version == 4:
             if self._read_only:
                 raise RuntimeError("database schema needs migration; run 'ss migrate' first")
-            schema_v5.migrate(connection)
+            schema_v5.migrate(connection, on_progress=migration_progress)
         if not bool(connection.execute("PRAGMA foreign_keys").fetchone()[0]):
             raise RuntimeError("SQLite foreign-key enforcement could not be enabled")
+        if creating:
+            report_progress(self._on_progress, "initialize", "Created database schema", 1, 1)
         return self
 
     @staticmethod
@@ -1142,10 +1155,14 @@ class Database:
         records: Sequence[dict[str, Any]],
         bug_payloads: Mapping[str, bytes],
         parsed_payloads: Mapping[str, Any] | None = None,
+        *,
+        on_progress: ProgressCallback | None = None,
     ) -> tuple[dict[str, tuple[bytes, dict[str, Any] | None, str | None]], list[str]]:
         out: dict[str, tuple[bytes, dict[str, Any] | None, str | None]] = {}
         errors: list[str] = []
-        for record in records:
+        for record in progress_items(
+            records, on_progress, "prepare-bugs", "Validating bug details", total=len(records)
+        ):
             key = record["key"]
             value = bug_payloads.get(key)
             if value is None:
@@ -1268,7 +1285,14 @@ class Database:
                     (location_store.PATCH_PARSER_VERSION,),
                 )
             }
-        for key, path in paths.items():
+        plural = "reports" if kind == "report" else "patches"
+        for key, path in progress_items(
+            paths.items(),
+            self._on_progress,
+            f"prepare-{plural}",
+            f"Preparing {plural}",
+            total=len(paths),
+        ):
             try:
                 data, stamp, digest = inventory.read_observation(path)
                 inspection = ArtifactInspection(path, stamp, digest, None)
@@ -1489,7 +1513,7 @@ class Database:
             return self._finish_failed(run_id, failed_summary)
 
         prepared_payloads, payload_errors = self._prepare_bug_payloads(
-            prepared, bug_payloads, parsed_payloads
+            prepared, bug_payloads, parsed_payloads, on_progress=self._on_progress
         )
         errors.extend(payload_errors)
         payload_valid = sum(
@@ -1724,7 +1748,15 @@ class Database:
                 version_ids: dict[str, int] = {}
                 candidate_bug_updates: list[tuple[str, str, str, str, int, int]] = []
                 candidate_resolution_versions: list[tuple[int, int]] = []
-                for position, record in enumerate(prepared):
+                for position, record in enumerate(
+                    progress_items(
+                        prepared,
+                        self._on_progress,
+                        "index-bugs",
+                        "Indexing bug details",
+                        total=len(prepared),
+                    )
+                ):
                     key = record["key"]
                     listing_record_digest, was_added = self._put_blob(
                         connection, record["raw_bytes"], "application/json", now
@@ -1957,7 +1989,13 @@ class Database:
                         )
 
                 candidate_reports: list[tuple[str, int | None, str, int]] = []
-                for key, inspection in report_files.items():
+                for key, inspection in progress_items(
+                    report_files.items(),
+                    self._on_progress,
+                    "index-reports",
+                    "Indexing reports",
+                    total=len(report_files),
+                ):
                     data, path = inspection.read(inventory), inspection.path
                     validation_error = inspection.error
                     valid = validation_error is None
@@ -2061,7 +2099,13 @@ class Database:
 
                 candidate_patches: list[tuple[str, str, str]] = []
                 normalized_patch_files = {key.lower(): value for key, value in patch_files.items()}
-                for commit_hash, inspection in normalized_patch_files.items():
+                for commit_hash, inspection in progress_items(
+                    normalized_patch_files.items(),
+                    self._on_progress,
+                    "index-patches",
+                    "Indexing patches",
+                    total=len(normalized_patch_files),
+                ):
                     data, path = inspection.read(inventory), inspection.path
                     validation_error = inspection.error
                     valid = validation_error is None
@@ -2143,6 +2187,9 @@ class Database:
                     if commit_hash not in expected_hashes:
                         summary["patches"]["orphan_files"] += 1
 
+                report_progress(
+                    self._on_progress, "commit-snapshot", "Saving snapshot result", 0, 1
+                )
                 if verify_files is not None:
                     verify_files()
                 current_snapshot = connection.execute(
@@ -2313,6 +2360,7 @@ class Database:
             summary["failures"] = errors[:100]
             summary["blobs_added"] = initially_added
             return self._finish_failed(run_id, summary)
+        report_progress(self._on_progress, "commit-snapshot", "Snapshot result committed", 1, 1)
         return summary
 
     def _upsert_commit(self, connection: sqlite3.Connection, commit_hash: str, run_id: int) -> None:
@@ -2769,6 +2817,13 @@ class Database:
         """Hash only retained input files; databases and analysis outputs are excluded."""
         return FileInventory().fingerprint(layout)
 
+    def _fingerprint_files(
+        self, inventory: FileInventory, layout: Mapping[str, Path]
+    ) -> tuple[str, list[str]]:
+        if self._on_progress is None:
+            return inventory.fingerprint(layout)
+        return inventory.fingerprint(layout, on_progress=self._on_progress)
+
     @staticmethod
     def _set_last_checked(connection: sqlite3.Connection, checked_at: str) -> str:
         connection.execute(
@@ -2809,7 +2864,7 @@ class Database:
         _, pending_errors = self._pending_file_retries(layout, inventory)
         if pending_errors:
             return None
-        fingerprint, errors = inventory.fingerprint(layout)
+        fingerprint, errors = self._fingerprint_files(inventory, layout)
         if errors:
             return None
         result = self._unchanged_files_result(fingerprint, source_kind)
@@ -2889,7 +2944,7 @@ class Database:
         inherited_errors = list(errors)
         unavailable_reports, pending_errors = self._pending_file_retries(layout, inventory)
         inherited_errors.extend(pending_errors)
-        fingerprint, fingerprint_errors = inventory.fingerprint(layout)
+        fingerprint, fingerprint_errors = self._fingerprint_files(inventory, layout)
         inherited_errors.extend(fingerprint_errors)
 
         def verify_files() -> None:
@@ -2969,7 +3024,9 @@ class Database:
 
         bug_payloads: dict[str, bytes] = {}
         parsed_payloads: dict[str, Any] = {}
-        for value in records:
+        for value in progress_items(
+            records, self._on_progress, "read-bugs", "Reading saved bug details", total=len(records)
+        ):
             try:
                 key = _text(_as_mapping(value).get("key"))
             except TypeError:
@@ -3685,11 +3742,19 @@ class Database:
         """Check SQLite integrity, foreign keys, snapshots, and blob hashes."""
         self.initialize()
         connection = self.connection
+        report_progress(self._on_progress, "check-sqlite", "Checking SQLite integrity", 0, 2)
         quick_rows = [row[0] for row in connection.execute("PRAGMA quick_check")]
+        report_progress(self._on_progress, "check-sqlite", "Checking foreign keys", 1, 2)
         foreign_rows = [tuple(row) for row in connection.execute("PRAGMA foreign_key_check")]
+        report_progress(self._on_progress, "check-sqlite", "SQLite checks processed", 2, 2)
         blob_mismatches: list[dict[str, Any]] = []
         blob_count = 0
-        for row in connection.execute("SELECT sha256, size_bytes, content FROM blobs"):
+        for row in progress_items(
+            connection.execute("SELECT sha256, size_bytes, content FROM blobs"),
+            self._on_progress,
+            "check-blobs",
+            "Checking saved blob hashes",
+        ):
             blob_count += 1
             content = bytes(row["content"])
             actual = hashlib.sha256(content).hexdigest()
@@ -3703,8 +3768,11 @@ class Database:
                     }
                 )
         snapshot_errors: list[str] = []
+        report_progress(self._on_progress, "check-snapshots", "Checking snapshot consistency", 0, 3)
         snapshot_errors.extend(schema_v3.consistency_errors(connection))
+        report_progress(self._on_progress, "check-snapshots", "Checking bug classifications", 1, 3)
         snapshot_errors.extend(schema_v4.consistency_errors(connection))
+        report_progress(self._on_progress, "check-snapshots", "Checking active membership", 2, 3)
         current_rows = connection.execute(
             "SELECT id, record_count FROM snapshots WHERE is_current = 1"
         ).fetchall()
@@ -3723,6 +3791,7 @@ class Database:
                     f"{current_rows[0]['record_count']} but has "
                     f"{membership_count} memberships"
                 )
+        report_progress(self._on_progress, "check-snapshots", "Snapshot checks processed", 3, 3)
         ok = (
             quick_rows == ["ok"]
             and not foreign_rows

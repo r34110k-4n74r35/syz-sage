@@ -22,9 +22,11 @@ def _value_tone(label: str, value: object) -> str:
         ("unknown", "unavailable", "unresolved", "partial", "not yet", "not recorded")
     ):
         return "warning"
+    if re.search(r"\b[1-9][\d,]* (?:missing|invalid)\b", text):
+        return "warning"
     if label in {"SQLite", "Foreign keys", "Blob hashes", "Snapshots"}:
         return "success" if text in {"ok", "0 errors"} else "error"
-    if label in {"Status", "Result"}:
+    if label in {"Status", "Saved status", "Result"}:
         if text.startswith(("failed", "error")):
             return "error"
         if "not activated" in text:
@@ -51,9 +53,9 @@ def _value_tone(label: str, value: object) -> str:
         return "link"
     if label in {"Key", "File", "Database", "Retained files", "Role"}:
         return "accent"
-    if label in {"First crash", "Last crash", "Fix time", "Close time", "Finished"}:
+    if label in {"First crash", "Last crash", "Fix time", "Close time", "Finished", "Last checked"}:
         return "date"
-    if label.endswith("keys") or label in {"Changes", "No longer listed"}:
+    if label.endswith("keys") or label in {"Changes", "No longer listed", "Migration"}:
         return "accent"
     if re.match(r"^\d", text):
         return "number"
@@ -62,6 +64,27 @@ def _value_tone(label: str, value: object) -> str:
 
 def fields(rows: Sequence[tuple[str, object]], *, indent: int = 2) -> None:
     _fields(rows, indent=indent, tones={label: _value_tone(label, value) for label, value in rows})
+
+
+_TITLE_PREFIX = re.compile(
+    r"^(?P<number>\d+\.\s+)?"
+    r"(?P<category>(?:BUG:\s*)?"
+    r"(?:KASAN|KMSAN|KCSAN|UBSAN|KFENCE|WARNING|INFO|kernel BUG|kernel panic|BUG|"
+    r"general protection fault|unable to handle kernel paging request):?)(?=\s|$)",
+    re.I,
+)
+
+
+def _title_colors(line: str) -> str:
+    """Distinguish the reported diagnostic prefix without rewriting its title."""
+    match = _TITLE_PREFIX.match(line)
+    if not match:
+        return style(line, tone="strong")
+    return (
+        style(match["number"] or "", tone="strong")
+        + style(match["category"], tone="tag")
+        + style(line[match.end() :], tone="strong")
+    )
 
 
 def _range_colors(line: str) -> str:
@@ -116,8 +139,12 @@ def human_status(value: dict[str, Any]) -> None:
     section("Last synchronization")
     state = value.get("last_sync_status") or "not yet run"
     paragraph(state, indent=2, tone="success" if state == "completed" else "warning")
-    if value.get("last_sync_at"):
-        fields([("Finished", _date(value["last_sync_at"]))])
+    times = [
+        (label, _date(value[field]))
+        for label, field in (("Finished", "last_sync_at"), ("Last checked", "last_checked_at"))
+        if value.get(field)
+    ]
+    fields(times)
     if not value.get("current_snapshot"):
         paragraph("No complete snapshot is active yet.", indent=2, tone="muted")
 
@@ -167,10 +194,13 @@ def human_list(rows: list[dict[str, Any]], *, offset: int = 0) -> None:
     key_width = max(len(safe_text(row.get("key", ""))) for row in rows)
     width = terminal_width()
     # A long identifier or narrow terminal is clearer as a compact record.
-    if width - key_width - 22 < 28:
+    long_tag = any(len(safe_text(tag)) > 16 for row in rows for tag in row.get("subsystems", []))
+    if width - key_width - 22 < 28 or long_tag:
         for index, row in enumerate(rows, offset + 1):
             paragraph(
-                f"{index}. {row.get('title', '')}", tone="strong", hanging=len(str(index)) + 2
+                f"{index}. {row.get('title', '')}",
+                highlight=_title_colors,
+                hanging=len(str(index)) + 2,
             )
             fields(
                 [
@@ -203,7 +233,7 @@ def human_list(rows: list[dict[str, Any]], *, offset: int = 0) -> None:
                 print(
                     f"{style(key_cell.ljust(key_width), tone='accent')}  "
                     f"{style(tag_cell.ljust(tags_width), tone=tag_tone)}  "
-                    f"{style(title_cell, tone='strong')}"
+                    f"{_title_colors(title_cell)}"
                 )
         print()
     paragraph(
@@ -265,7 +295,7 @@ def human_filter(value: dict[str, Any], *, query: str | None = None) -> None:
         print()
         paragraph(
             f"{index}. {row.get('title') or 'Untitled bug'}",
-            tone="strong",
+            highlight=_title_colors,
             hanging=len(str(index)) + 2,
         )
         # Keep each URL intact for copying, including in a narrow terminal.
@@ -366,7 +396,7 @@ def _fix_locations(locations: Sequence[Mapping[str, Any]]) -> None:
 
 
 def human_bug(bug: dict[str, Any], include_report: bool, include_stack: bool = False) -> None:
-    paragraph(bug.get("title", "Untitled bug"), tone="heading")
+    paragraph(bug.get("title", "Untitled bug"), highlight=_title_colors)
     metadata: list[tuple[str, object]] = [
         ("Key", bug.get("key", "")),
         ("Bug type", _bug_type_label(bug.get("bug_type"))),
@@ -578,16 +608,14 @@ def human_update(summary: UpdateSummary, data_root: Path, database_path: Path) -
     if state == "failed":
         tone = "error"
     paragraph(heading, tone=tone)
-    fields(
-        [
-            ("Fixed bugs", f"{summary.listing_bugs:,} live"),
-            (
-                "Changes",
-                f"{summary.new_fixed_bugs:,} new; {summary.changed_bugs:,} changed; "
-                f"{summary.no_longer_listed_bugs:,} no longer listed",
-            ),
-        ]
-    )
+    changes: list[tuple[str, object]] = [
+        ("Fixed bugs", f"{summary.listing_bugs:,} live"),
+        (
+            "Changes",
+            f"{summary.new_fixed_bugs:,} new; {summary.changed_bugs:,} changed; "
+            f"{summary.no_longer_listed_bugs:,} no longer listed",
+        ),
+    ]
     for label, keys in (
         ("New keys", summary.new_fixed_bug_keys),
         ("Changed keys", summary.changed_bug_keys),
@@ -597,7 +625,8 @@ def human_update(summary: UpdateSummary, data_root: Path, database_path: Path) -
             preview = ", ".join(keys[:10])
             if len(keys) > 10:
                 preview += f", ... (+{len(keys) - 10:,} more)"
-            fields([(label, preview)])
+            changes.append((label, preview))
+    fields(changes)
     _download_table(summary)
     section("Database")
     result = {
@@ -607,7 +636,13 @@ def human_update(summary: UpdateSummary, data_root: Path, database_path: Path) -
         else "complete; snapshot not activated",
         "partial": "partial; no snapshot activated",
     }.get(state, state)
-    fields([("Result", result), ("File", database_path), ("Retained files", data_root)])
+    database_rows: list[tuple[str, object]] = [("Result", result)]
+    if summary.database.get("snapshot_id") is not None:
+        database_rows.append(("Snapshot", summary.database["snapshot_id"]))
+    if "blobs_added" in summary.database:
+        database_rows.append(("New blobs", f"{summary.database['blobs_added']:,}"))
+    database_rows.extend([("File", database_path), ("Retained files", data_root)])
+    fields(database_rows)
     if state == "partial":
         paragraph(
             "Any previously active snapshot is unchanged. Retry 'ss update' to resume.",
@@ -646,25 +681,82 @@ def human_update(summary: UpdateSummary, data_root: Path, database_path: Path) -
 
 def human_import(result: dict[str, Any], database_path: Path) -> None:
     state = result.get("status", "unknown")
+    activated = bool(result.get("activated"))
+    heading = {
+        "completed": "Import complete" if activated else "Import not activated",
+        "unchanged": "Import already current",
+        "partial": "Import incomplete",
+        "failed": "Import failed",
+    }.get(state, "Import result unknown")
     paragraph(
-        f"Import: {state}", tone="success" if state in {"completed", "unchanged"} else "warning"
+        heading,
+        tone="error"
+        if state == "failed"
+        else "success"
+        if state == "unchanged" or state == "completed" and activated
+        else "warning",
     )
-    fields(
-        [
-            ("Database", database_path),
-            ("Bugs", f"{result.get('bugs', 0):,}"),
-            ("Reports", f"{result.get('reports', 0):,}"),
-            ("Patches", f"{result.get('patches', 0):,}"),
-        ]
-    )
+    outcome = {
+        "completed": "complete; snapshot activated"
+        if activated
+        else "complete; snapshot not activated",
+        "unchanged": "unchanged; SQLite write skipped",
+        "partial": "partial; no snapshot activated",
+        "failed": "failed; no snapshot activated",
+    }.get(state, str(state))
+    fields([("Result", outcome), ("Database", database_path)])
+    rows: list[tuple[str, object]] = []
+    bug_count = result.get("bugs", result.get("records_imported"))
+    if bug_count is not None:
+        rows.append(("Bugs", f"{bug_count:,}"))
+    for label, key in (
+        ("Bug details", "bug_payloads"),
+        ("Reports", "reports"),
+        ("Patches", "patches"),
+    ):
+        count = result.get(key)
+        details = result.get(
+            {"reports": "report_details", "patches": "patch_details"}.get(key, key), count
+        )
+        if isinstance(details, Mapping):
+            text = f"{details.get('valid', 0):,} valid"
+            if "expected" in details:
+                text += f" / {details['expected']:,} expected"
+            for field, suffix in (
+                ("missing", "missing"),
+                ("invalid", "invalid"),
+                ("unavailable_upstream", "not provided upstream"),
+            ):
+                if details.get(field):
+                    text += f"; {details[field]:,} {suffix}"
+            rows.append((label, text))
+        elif count is not None:
+            rows.append((label, f"{count:,}"))
+    if "blobs_added" in result:
+        rows.append(("New blobs", f"{result['blobs_added']:,}"))
+    if rows:
+        section("Imported data" if state == "completed" and activated else "Local data")
+        fields(rows)
     if state == "partial":
         paragraph("Candidate retained; active snapshot unchanged.", indent=2, tone="warning")
     _issues([str(item) for item in result.get("failures") or []])
 
 
-def human_migrate(result: dict[str, Any], database_path: Path) -> None:
+def human_migrate(
+    result: dict[str, Any], database_path: Path, *, prior_schema: int | None = None
+) -> None:
     paragraph(f"Database ready · schema {result['schema_version']}", tone="success")
-    fields([("File", database_path)])
+    rows: list[tuple[str, object]] = [("File", database_path)]
+    if prior_schema is not None:
+        rows.append(
+            (
+                "Migration",
+                "already current"
+                if prior_schema == result["schema_version"]
+                else f"schema {prior_schema} -> {result['schema_version']}",
+            )
+        )
+    fields(rows)
     section("Indexed locations")
     fields(
         [
@@ -677,6 +769,7 @@ def human_migrate(result: dict[str, Any], database_path: Path) -> None:
             )
         ]
     )
+    paragraph("Counts include all retained history.", indent=2, tone="muted")
 
 
 def progress(message: str) -> None:

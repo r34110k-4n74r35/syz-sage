@@ -40,6 +40,7 @@ from .parsing import (
     valid_listing_html,
     validate_listing_membership,
 )
+from .progress_events import ProgressCallback, ProgressEvent, emit_progress
 from .resolutions import (
     ResolutionTargets,
     resolution_identity,
@@ -369,20 +370,38 @@ class Updater:
         database_path: Path,
         client: SyzbotClient | None = None,
         progress: Callable[[str], None] | None = None,
+        *,
+        on_progress: ProgressCallback | None = None,
     ) -> None:
         self.paths = paths
         self.database_path = database_path
         self.client = client or SyzbotClient()
         self.progress = progress or (lambda message: None)
+        self.on_progress = on_progress
+
+    def _notify(
+        self,
+        phase: str,
+        message: str,
+        completed: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        emit_progress(self.on_progress, ProgressEvent(phase, message, completed, total))
 
     def _phase_progress(self, label: str, total: int) -> Callable[[], None]:
         """Report long batches without printing one line for every download."""
         completed = 0
         last_message = time.monotonic()
+        phase = "download-" + label.lower().replace(" ", "-")
+        message = f"{label}: downloading {total:,}"
+        if not total:
+            message = f"{label}: no downloads needed"
+        self._notify(phase, message, 0, total)
 
         def advance() -> None:
             nonlocal completed, last_message
             completed += 1
+            self._notify(phase, message, completed, total)
             now = time.monotonic()
             if now - last_message >= 5 or (completed == total and total >= 20):
                 self.progress(f"{label}: processed {completed:,}/{total:,} downloads.")
@@ -399,6 +418,7 @@ class Updater:
         self.database_path = writable_path(self.database_path)
         self.progress(f"Data directory: {self.paths.root}")
         self.paths.ensure()
+        self._notify("update-lock", "Preparing update")
         with _exclusive_update_lock(self.paths.root):
             return self._run_locked(options)
 
@@ -458,11 +478,13 @@ class Updater:
         )
 
         self.progress(f"Checking {self.client.dashboard}/{options.namespace}/{options.status} ...")
+        self._notify("listing", "Checking fixed bugs on syzbot", 0, 2)
         listing_bytes = self.client.listing_json(options.namespace, options.status)
         records = parse_listing(listing_bytes, dashboard=self.client.dashboard)
         if not records:
             raise PayloadError("live listing contains no bug records")
         summary.listing_bugs = len(records)
+        self._notify("listing", "Checking subsystem tags on syzbot", 1, 2)
         live_keys = {str(record["key"]) for record in records}
         mirror_new_keys, summary.changed_bug_keys = _listing_discrepancies(
             records,
@@ -521,6 +543,13 @@ class Updater:
             atomic_write(self.paths.listing_html, listing_html)
             inventory.verify_saved(self.paths.listing_html, listing_html)
         write_catalog(self.paths, records, source_url, inventory)
+        self._notify(
+            "listing",
+            f"Fixed listing: {len(records):,} bugs; {len(mirror_new_keys):,} new, "
+            f"{summary.changed_bugs:,} changed",
+            2,
+            2,
+        )
 
         selected = records[: options.limit] if options.limit is not None else records
         if len(selected) != len(records):
@@ -649,7 +678,8 @@ class Updater:
         details: dict[str, dict[str, Any]] = {}
         refreshed: set[str] = set()
         jobs: list[DownloadJob] = []
-        for record in plan.records:
+        for index, record in enumerate(plan.records):
+            self._notify("saved-details", "Checking saved bug details", index, len(plan.records))
             key = str(record["key"])
             job = DownloadJob(
                 "bug-json", key, self.paths.bugs / f"{key}.json", source_url=str(record["json_url"])
@@ -667,6 +697,13 @@ class Updater:
                 summary.details_reused += 1
                 continue
             jobs.append(replace(job, reason=reason))
+
+        self._notify(
+            "saved-details",
+            f"Saved bug details: {summary.details_reused:,} reused; {len(jobs):,} to download",
+            len(plan.records),
+            len(plan.records),
+        )
 
         def accept(result: ArtifactResult) -> None:
             key = result.job.key
@@ -714,16 +751,21 @@ class Updater:
     ) -> None:
         if not summary.failures and self.database_path.is_file():
             self.progress("Retrieval finished; checking whether SQLite is already current ...")
-            with contextlib.closing(Database(self.database_path, read_only=True)) as database:
+            self._notify("database-current", "Checking whether SQLite is already current")
+            with contextlib.closing(
+                Database(self.database_path, read_only=True, on_progress=self.on_progress)
+            ) as database:
                 summary.database = (
                     database.check_files_current(self.paths, inventory=inventory) or {}
                 )
         if summary.database:
             summary.database["skipped"] = True
             self.progress("No data changes; skipping SQLite update.")
+            self._notify("database-current", "No data changes; skipping SQLite update", 1, 1)
         else:
             self.progress("Retrieval finished; updating SQLite from retained files ...")
-            with Database(self.database_path) as database:
+            self._notify("database-index", "Updating SQLite from retained files")
+            with Database(self.database_path, on_progress=self.on_progress) as database:
                 database.initialize()
                 summary.database = database.ingest_files(
                     self.paths,
@@ -737,6 +779,7 @@ class Updater:
                     ],
                 )
             summary.database["skipped"] = False
+        self._notify("database-result", "Database processing finished", 1, 1)
         summary.known_fixed_bugs = int(summary.database.get("known_fixed_bugs") or 0)
         summary.new_fixed_bugs = int(summary.database.get("new_fixed_bugs") or 0)
         new_fixed_bug_keys = summary.database.get("new_fixed_bug_keys")
@@ -765,7 +808,8 @@ class Updater:
     ) -> None:
         force_keys = force_keys or set()
         jobs: list[DownloadJob] = []
-        for record in records:
+        for index, record in enumerate(records):
+            self._notify("saved-reports", "Checking saved crash reports", index, len(records))
             key = str(record["key"])
             try:
                 url = first_report_url(details.get(key, {}), dashboard=self.client.dashboard)
@@ -788,6 +832,13 @@ class Updater:
                     summary.reports_reused += 1
                     continue
             jobs.append(replace(job, reason=reason))
+
+        self._notify(
+            "saved-reports",
+            f"Saved crash reports: {summary.reports_reused:,} reused; {len(jobs):,} to download",
+            len(records),
+            len(records),
+        )
 
         def accept(result: ArtifactResult) -> None:
             summary.reports_downloaded += 1
@@ -820,6 +871,7 @@ class Updater:
         inventory: FileInventory,
         source_urls: dict[Path, str],
     ) -> None:
+        self._notify("patch-references", "Matching fix commits and resolved patches")
         references: dict[str, str | None] = {}
         for record in records:
             for fix in effective_fixes(record, details.get(str(record["key"]))):
@@ -852,7 +904,8 @@ class Updater:
         for commit_hash, repo in resolution_jobs:
             _add_patch_job(references, commit_hash, repo)
         jobs: list[DownloadJob] = []
-        for commit_hash, repo in references.items():
+        for index, (commit_hash, repo) in enumerate(references.items()):
+            self._notify("saved-patches", "Checking saved fix patches", index, len(references))
             job = DownloadJob(
                 "patch", commit_hash, self.paths.patches / f"{commit_hash}.diff", repo=repo
             )
@@ -866,6 +919,13 @@ class Updater:
                     summary.patches_reused += 1
                     continue
             jobs.append(replace(job, reason=reason))
+
+        self._notify(
+            "saved-patches",
+            f"Saved fix patches: {summary.patches_reused:,} reused; {len(jobs):,} to download",
+            len(references),
+            len(references),
+        )
 
         def accept(result: ArtifactResult) -> None:
             summary.patches_downloaded += 1

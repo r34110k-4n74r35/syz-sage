@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .progress_events import ProgressCallback, progress_items, report_progress
+
 UNPARSED = object()
 FileStamp = tuple[int, int, int, int, int]
 InputIdentity = tuple[str, tuple[tuple[str, FileStamp], ...]]
@@ -230,13 +232,29 @@ class FileInventory:
             self.invalidate()
             raise OSError("retained input files changed after fingerprinting; retry ingestion")
 
-    def fingerprint(self, layout: Mapping[str, Path]) -> tuple[str, list[str]]:
+    def fingerprint(
+        self, layout: Mapping[str, Path], *, on_progress: ProgressCallback | None = None
+    ) -> tuple[str, list[str]]:
         """Keep the legacy exact-content fingerprint; reuse it only for stable inputs."""
+        report_progress(on_progress, "fingerprint", "Inspecting retained input files")
         candidates, identity, errors = self._inputs(layout)
         if not errors and self._fingerprint is not None and self._fingerprint[0] == identity:
+            report_progress(
+                on_progress,
+                "fingerprint",
+                "Verified unchanged input inventory",
+                len(candidates),
+                len(candidates),
+            )
             return self._fingerprint[1], list(self._fingerprint[2])
         digest = hashlib.sha256()
-        for path in candidates:
+        for path in progress_items(
+            candidates,
+            on_progress,
+            "fingerprint",
+            "Fingerprinting retained input files",
+            total=len(candidates),
+        ):
             try:
                 label = str(path.relative_to(layout["root"]))
             except ValueError:

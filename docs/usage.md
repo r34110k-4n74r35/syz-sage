@@ -377,15 +377,19 @@ all connections close and the log has been checkpointed.
 
 ## JSON and automation
 
-Update progress goes to stderr; summaries and JSON results go to stdout.
-`update --quiet` suppresses progress while preserving the human summary and
-issues. `--json` suppresses progress and preserves structured results, including
+Progress for `update`, `import-legacy`, `migrate`, and `check` goes to stderr;
+summaries and JSON results go to stdout. Each of these commands accepts
+`--quiet` to suppress progress while preserving the human summary and issues.
+`--json` suppresses progress and preserves structured results, including
 the full retrieval failure list and available database failure details. Human
 update summaries show at most five distinct issues.
 
 ```console
 ss update --quiet
 ss update --json
+ss import-legacy ./data --quiet
+ss migrate --quiet
+ss check --json
 ss status --json
 ss show extid-0a884bc2d304ce4af70f --json --report
 ss filter --type kasan --subsystem fs --all --json
@@ -416,7 +420,21 @@ inspect the result as well as the process exit status.
 Help groups related options and includes examples. Human summaries wrap to the
 terminal width; narrow terminals use individual records instead of wide
 tables. Bug inspection groups each fix commit with its changed locations and
-numbers stack frames when `--stack` is used.
+numbers stack frames when `--stack` is used. URLs, bug keys, and commit hashes
+remain intact for copying, even when a long value exceeds the terminal width.
+
+Long-running commands share a live progress display. Each phase has its own
+counter and progress bar when its total is known; work without a known total
+shows a spinner and elapsed time. Counts describe processed items, including
+failed attempts. A full bar means that phase finished processing, while the
+final summary states whether the operation succeeded or left a partial
+candidate. Database phases include checking retained files, indexing evidence,
+reparsing stored reports during migration, and checking blob hashes.
+
+Progress redraws in place on an interactive terminal and leaves short phase
+summaries behind. Pipes, redirected stderr, and `TERM=dumb` use plain phase
+lines without animation or cursor controls. `--quiet` also removes those lines.
+Ctrl-C stops the progress display before the interruption message is printed.
 
 Colors are enabled independently for interactive stdout and stderr. `NO_COLOR`
 (even an empty value) or `TERM=dumb` disables them. Redirected output and JSON
@@ -427,11 +445,13 @@ NO_COLOR=1 ss show extid-0a884bc2d304ce4af70f --stack
 NO_COLOR=1 ss update
 ```
 
-Cyan highlights counts and source paths; magenta marks tags and functions;
-blue marks links and dates. Green denotes success or available content, while
-yellow marks unavailable or uncertain values. Fix ranges use red for old
+Cyan highlights counts and source paths; magenta marks diagnostic prefixes,
+tags, and functions; bright blue marks links and dates. Green denotes success
+or available content, while yellow marks unavailable or uncertain values. Fix ranges use red for old
 lines and green for new lines; failures are also red. Written labels carry
 the same meaning when color is disabled.
+`NO_COLOR` removes styling but keeps interactive progress; use `--quiet` to
+hide progress entirely.
 
 Human output escapes source terminal-control characters. `--report` preserves
 report line breaks and tabs while escaping other controls. For original

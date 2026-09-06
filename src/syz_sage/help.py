@@ -10,7 +10,7 @@ from typing import Any, Protocol, TextIO, cast
 
 from .terminal import safe_text, style, terminal_width
 
-_COMMANDS = "update|show|list|status|check|import-legacy|migrate"
+_COMMANDS = "update|show|list|filter|status|check|import-legacy|migrate"
 _TOKENS = re.compile(r"(?<![\w-])--?[A-Za-z][A-Za-z0-9-]*")
 _COMMAND_ROW = re.compile(rf"^(\s+)({_COMMANDS})(\s{{2,}}.*)$")
 _EXAMPLE = re.compile(r"^(\s+)(ss)(\s+.*)$")

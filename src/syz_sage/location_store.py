@@ -17,6 +17,7 @@ from .locations import (
 )
 from .parsing import parse_subsystem_tags
 from .patch_locations import FixLocation, extract_fix_locations
+from .progress_events import ProgressCallback, progress_items, report_progress
 
 REPORT_PARSER_VERSION = 3
 PATCH_PARSER_VERSION = 2
@@ -379,31 +380,50 @@ def index_patch(
         )
 
 
-def migrate_v2(connection: sqlite3.Connection) -> None:
+def migrate_v2(
+    connection: sqlite3.Connection, *, on_progress: ProgressCallback | None = None
+) -> None:
     """Add derived data atomically, using stored blobs and no network access."""
+    report_progress(on_progress, "migrate-v2", "Migrating database to schema 2")
     connection.execute("BEGIN IMMEDIATE")
     try:
         # Avoid executescript's implicit commit: schema and backfill must be atomic.
         for statement in SCHEMA_V2.split(";"):
             if statement.strip():
                 connection.execute(statement)
-        for row in connection.execute("SELECT id FROM snapshots").fetchall():
+        snapshots = connection.execute("SELECT id FROM snapshots").fetchall()
+        for row in progress_items(
+            snapshots,
+            on_progress,
+            "migrate-v2-subsystems",
+            "Indexing stored subsystem tags",
+            total=len(snapshots),
+        ):
             index_subsystems(connection, int(row["id"]))
-        for row in connection.execute(
+        reports = connection.execute(
             """SELECT rv.id, r.crash_id FROM reports r JOIN report_versions rv
                ON rv.report_id = r.id AND rv.blob_sha256 = r.current_blob_sha256
                WHERE r.crash_id IS NOT NULL AND rv.is_valid = 1""",
-        ).fetchall():
+        ).fetchall()
+        for row in progress_items(
+            reports,
+            on_progress,
+            "migrate-v2-reports",
+            "Parsing stored crash reports",
+            total=len(reports),
+        ):
             index_report(connection, int(row["id"]), int(row["crash_id"]))
-        for row in connection.execute(
-            "SELECT id FROM patch_versions WHERE is_valid = 1"
-        ).fetchall():
+        patches = connection.execute("SELECT id FROM patch_versions WHERE is_valid = 1").fetchall()
+        for row in progress_items(
+            patches, on_progress, "migrate-v2-patches", "Parsing stored patches", total=len(patches)
+        ):
             index_patch(connection, int(row["id"]))
         connection.execute("PRAGMA user_version = 2")
         connection.commit()
     except BaseException:
         connection.rollback()
         raise
+    report_progress(on_progress, "migrate-v2", "Database schema 2 committed", 1, 1)
 
 
 def bug_locations(connection: sqlite3.Connection, bug_id: int) -> dict[str, Any]:

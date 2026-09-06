@@ -84,6 +84,13 @@ migrations and parser revisions must preserve that provenance. See
 
 Presentation is separate from retrieval and storage. `display.py` produces
 human views; `terminal.py` handles escaping, wrapping, and optional ANSI colors.
+`progress_events.py` defines observational phase/count events shared by sync
+and database work. `progress.py` renders those events on stderr with live
+terminal bars or sparse plain lines for redirected output. Report actual
+processed counts, and use an unknown total for work that cannot be measured.
+Finishing a phase does not imply successful validation or a committed snapshot.
+JSON and quiet modes attach no progress listener. Ordinary listener failures
+must not change database results; cancellation still propagates.
 JSON is emitted directly from structured results in `cli.py`, without terminal
 decoration. Format plain text before applying color so ANSI sequences cannot
 change wrapping or column alignment.

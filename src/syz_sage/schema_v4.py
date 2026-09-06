@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 from .bug_types import BUG_TYPES, classify_bug_type
+from .progress_events import ProgressCallback, report_progress
 
 CURRENT_BUG_ROWS_V3 = """
 CREATE VIEW current_bug_rows AS
@@ -36,8 +37,9 @@ def validate(connection: sqlite3.Connection) -> None:
         raise RuntimeError(f"database schema version 4 is incomplete: {INDEX_NAME}")
 
 
-def migrate(connection: sqlite3.Connection) -> None:
+def migrate(connection: sqlite3.Connection, *, on_progress: ProgressCallback | None = None) -> None:
     """Classify retained snapshot titles atomically without changing raw evidence."""
+    report_progress(on_progress, "migrate-v4", "Migrating database to schema 4")
     connection.execute("BEGIN IMMEDIATE")
     try:
         allowed = ", ".join("'" + value.replace("'", "''") + "'" for value in BUG_TYPES)
@@ -45,6 +47,9 @@ def migrate(connection: sqlite3.Connection) -> None:
             "ALTER TABLE snapshot_bugs ADD COLUMN bug_type TEXT NOT NULL DEFAULT 'other' "
             f"CHECK (bug_type IN ({allowed}))"
         )
+        total = int(connection.execute("SELECT COUNT(*) FROM snapshot_bugs").fetchone()[0])
+        completed = 0
+        report_progress(on_progress, "migrate-v4-bugs", "Classifying stored bug titles", 0, total)
         cursor = connection.execute("SELECT snapshot_id, bug_id, title FROM snapshot_bugs")
         while rows := cursor.fetchmany(256):
             connection.executemany(
@@ -53,6 +58,10 @@ def migrate(connection: sqlite3.Connection) -> None:
                     (classify_bug_type(row["title"]), row["snapshot_id"], row["bug_id"])
                     for row in rows
                 ],
+            )
+            completed += len(rows)
+            report_progress(
+                on_progress, "migrate-v4-bugs", "Classifying stored bug titles", completed, total
             )
         connection.execute(f"CREATE INDEX {INDEX_NAME} ON snapshot_bugs(snapshot_id, bug_type)")
         connection.execute("DROP VIEW current_bug_rows")
@@ -63,6 +72,7 @@ def migrate(connection: sqlite3.Connection) -> None:
     except BaseException:
         connection.rollback()
         raise
+    report_progress(on_progress, "migrate-v4", "Database schema 4 committed", 1, 1)
 
 
 def consistency_errors(connection: sqlite3.Connection) -> list[str]:

@@ -404,11 +404,13 @@ class CliTests(unittest.TestCase):
 
             code, stdout, stderr = invoke(["--data-dir", str(data_dir), "update"])
             self.assertEqual(code, 0, stderr or stdout)
-            self.assertIn("Checking https://syzkaller.appspot.com/upstream/fixed", stderr)
+            self.assertIn("Checking fixed bugs on syzbot", stderr)
             self.assertIn("Bug details: downloading 2", stderr)
             self.assertIn("Crash reports: downloading 1", stderr)
             self.assertIn("Fix patches: downloading 1", stderr)
-            self.assertIn("updating SQLite", stderr)
+            self.assertIn("Updating SQLite", stderr)
+            self.assertNotIn("\r", stderr)
+            self.assertNotIn("\x1b", stderr)
             self.assertIn("snapshot activated", stdout)
 
             client.bug.reset_mock()
@@ -491,10 +493,58 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIsNone(updater.call_args.kwargs["progress"])
+        self.assertIsNone(updater.call_args.kwargs["on_progress"])
         self.assertEqual(stderr, "")
         self.assertIn("Fixed bugs: 2 live", compact(stdout))
         self.assertIn("report extid-alpha123: timed out", stdout)
         self.assertIn("Issues (1)", stdout)
+
+    def test_offline_progress_commands_support_plain_quiet_and_json_output(self) -> None:
+        self.import_fixture()
+        for arguments, title in (
+            (["import-legacy", str(self.legacy)], "Importing saved data"),
+            (["migrate"], "Migrating database"),
+            (["check"], "Checking database"),
+        ):
+            base = ["--database", str(self.database), *arguments]
+            with self.subTest(command=arguments[0]):
+                code, stdout, stderr = invoke(base)
+                self.assertEqual(code, 0, stderr or stdout)
+                self.assertIn(title, stderr)
+                self.assertTrue(stdout.strip())
+                self.assertNotIn("\r", stderr)
+                self.assertNotIn("\x1b", stderr)
+
+                code, quiet_stdout, stderr = invoke([*base, "--quiet"])
+                self.assertEqual(code, 0, stderr)
+                self.assertEqual(stderr, "")
+                self.assertTrue(quiet_stdout.strip())
+
+                code, stdout, stderr = invoke([*base, "--json"])
+                self.assertEqual(code, 0, stderr)
+                self.assertEqual(stderr, "")
+                self.assertIsInstance(json.loads(stdout), dict)
+
+    def test_update_interrupt_cleans_progress_before_error(self) -> None:
+        with mock.patch("syz_sage.cli.Updater") as updater:
+            updater.return_value.run.side_effect = KeyboardInterrupt
+            code, stdout, stderr = invoke(["--data-dir", str(self.root / "data"), "update"])
+        self.assertEqual(code, 130)
+        self.assertEqual(stdout, "")
+        self.assertIn("Interrupted", stderr)
+        self.assertNotIn("\r", stderr)
+        self.assertNotIn("\x1b", stderr)
+
+    def test_migrate_shows_the_original_schema_and_reparse_progress(self) -> None:
+        self.import_fixture()
+        with Database(self.database) as database:
+            database.connection.execute("PRAGMA user_version=4")
+        code, stdout, stderr = invoke(["--database", str(self.database), "migrate"])
+        self.assertEqual(code, 0, stderr or stdout)
+        self.assertIn("Migration: schema 4 -> 5", compact(stdout))
+        self.assertIn("Reparsing stored crash reports", stderr)
+        self.assertNotIn("\r", stderr)
+        self.assertNotIn("\x1b", stderr)
 
     def test_update_limits_human_issues_but_preserves_all_in_json(self) -> None:
         failures = [

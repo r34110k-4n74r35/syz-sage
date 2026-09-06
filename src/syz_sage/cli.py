@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sqlite3
@@ -37,10 +38,9 @@ from .display import (
 from .display import (
     human_update as _human_update,
 )
-from .display import (
-    progress as _update_progress,
-)
 from .parsing import KEY_RE, MAX_BUG_KEY_LENGTH, absolute_syzbot_url, key_from_link
+from .progress import ProgressDisplay
+from .progress_events import ProgressEvent
 from .storage import writable_path
 from .sync import UpdateOptions, Updater, _exclusive_update_lock
 from .terminal import safe_text
@@ -317,7 +317,11 @@ def _parser() -> argparse.ArgumentParser:
             "Examples:\n  ss check\n  ss check --json\n\nReturns 0 when checks pass, 1 on failure."
         ),
     )
-    check.add_argument("--json", action="store_true", help="print all check results as JSON")
+    check_output = check.add_argument_group("Output")
+    check_output.add_argument("--json", action="store_true", help="print all check results as JSON")
+    check_output.add_argument(
+        "--quiet", action="store_true", help="hide progress; keep the check results"
+    )
 
     legacy = commands.add_parser(
         "import-legacy",
@@ -340,7 +344,13 @@ def _parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="saved data root (default: selected data directory)",
     )
-    legacy.add_argument("--json", action="store_true", help="print the import result as JSON")
+    legacy_output = legacy.add_argument_group("Output")
+    legacy_output.add_argument(
+        "--json", action="store_true", help="print the import result as JSON"
+    )
+    legacy_output.add_argument(
+        "--quiet", action="store_true", help="hide progress; keep the summary and issues"
+    )
 
     migrate = commands.add_parser(
         "migrate",
@@ -353,7 +363,13 @@ def _parser() -> argparse.ArgumentParser:
             "Examples:\n  ss migrate\n  ss check\n\nBack up valuable databases before upgrading."
         ),
     )
-    migrate.add_argument("--json", action="store_true", help="print the resulting database status")
+    migrate_output = migrate.add_argument_group("Output")
+    migrate_output.add_argument(
+        "--json", action="store_true", help="print the resulting database status"
+    )
+    migrate_output.add_argument(
+        "--quiet", action="store_true", help="hide progress; keep the migration summary"
+    )
     return parser
 
 
@@ -437,20 +453,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 parser.error("--workers must be at least 1")
             if args.limit is not None and args.limit < 1:
                 parser.error("--limit must be at least 1")
-            summary = Updater(
-                paths,
-                database_path,
-                progress=None if args.json or args.quiet else _update_progress,
-            ).run(
-                UpdateOptions(
-                    workers=args.workers,
-                    limit=args.limit,
-                    refresh_details=args.refresh_details,
-                    refresh_artifacts=args.refresh_artifacts,
-                    reports=not args.no_reports,
-                    patches=not args.no_patches,
+            enabled = not (args.json or args.quiet)
+            with ProgressDisplay("Updating fixed bugs", enabled=enabled) as progress:
+                summary = Updater(
+                    paths,
+                    database_path,
+                    progress=None,
+                    on_progress=progress if enabled else None,
+                ).run(
+                    UpdateOptions(
+                        workers=args.workers,
+                        limit=args.limit,
+                        refresh_details=args.refresh_details,
+                        refresh_artifacts=args.refresh_artifacts,
+                        reports=not args.no_reports,
+                        patches=not args.no_patches,
+                    )
                 )
-            )
+                progress.finish(success=summary.ok)
             payload = summary.as_dict()
             if args.json:
                 _dump(payload)
@@ -467,12 +487,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             existing_source_lock = (
                 lock_root == source.root and (lock_root / ".syz_sage.update.lock").is_file()
             )
+            enabled = not (args.json or args.quiet)
             with (
+                ProgressDisplay("Importing saved data", enabled=enabled) as progress,
                 _exclusive_update_lock(lock_root, create=not existing_source_lock),
-                Database(database_path) as database,
+                Database(database_path, on_progress=progress if enabled else None) as database,
             ):
                 database.initialize()
                 result = database.import_legacy(source)
+                progress.finish(success=not result.get("failures"))
             if args.json:
                 _dump(result)
             else:
@@ -487,13 +510,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
 
         if args.command == "migrate":
-            with _exclusive_update_lock(paths.root), Database(database_path) as database:
+            enabled = not (args.json or args.quiet)
+            with (
+                ProgressDisplay("Migrating database", enabled=enabled) as progress,
+                _exclusive_update_lock(paths.root),
+                contextlib.closing(
+                    Database(database_path, on_progress=progress if enabled else None)
+                ) as database,
+            ):
+                progress(ProgressEvent("schema", "Checking database schema"))
+                prior_schema = int(database.connection.execute("PRAGMA user_version").fetchone()[0])
+                database.initialize()
                 result = database.status()
             if args.json:
                 _dump(result)
             else:
-                human_migrate(result, database_path)
+                human_migrate(result, database_path, prior_schema=prior_schema)
             return 0
+
+        if args.command == "check":
+            enabled = not (args.json or args.quiet)
+            with (
+                ProgressDisplay("Checking database", enabled=enabled) as progress,
+                Database(
+                    database_path, read_only=True, on_progress=progress if enabled else None
+                ) as database,
+            ):
+                result = database.health_check()
+                progress.finish(success=bool(result.get("ok")))
+            _dump(result) if args.json else _human_check(result, database_path)
+            return 0 if result.get("ok") else 1
 
         with Database(database_path, read_only=True) as database:
             database.initialize()
@@ -501,10 +547,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = database.status()
                 _dump(result) if args.json else _human_status(result)
                 return 0
-            if args.command == "check":
-                result = database.health_check()
-                _dump(result) if args.json else _human_check(result, database_path)
-                return 0 if result.get("ok") else 1
             if args.command == "list":
                 if args.limit < 1 or args.offset < 0:
                     parser.error("--limit must be positive and --offset cannot be negative")

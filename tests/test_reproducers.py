@@ -176,7 +176,7 @@ class CReproducerTests(unittest.TestCase):
             code = main(["--database", str(self.path), "show", "extid-alpha123"])
         self.assertEqual(code, 0)
         self.assertIn("\x1b[32mavailable (URL recorded)\x1b[0m", output.getvalue())
-        self.assertIn("\x1b[4;34m", output.getvalue())
+        self.assertIn("\x1b[4;94m", output.getvalue())
 
     def test_unknown_sources_and_custom_dashboard_resolution(self) -> None:
         for raw, kind in ((None, "bug-json"), ({"crashes": []}, "listing-record")):

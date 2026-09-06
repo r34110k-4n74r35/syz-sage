@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 from . import location_store
+from .progress_events import ProgressCallback, progress_items, report_progress
 
 SCHEMA = """
 CREATE TABLE snapshot_reports (
@@ -114,8 +115,9 @@ def validate(connection: sqlite3.Connection) -> None:
             raise RuntimeError(f"database schema version 3 is incomplete: {trigger}")
 
 
-def migrate(connection: sqlite3.Connection) -> None:
+def migrate(connection: sqlite3.Connection, *, on_progress: ProgressCallback | None = None) -> None:
     """Preserve raw history; repair derived fields and record provable associations."""
+    report_progress(on_progress, "migrate-v3", "Migrating database to schema 3")
     connection.execute("BEGIN IMMEDIATE")
     try:
         statement = ""
@@ -145,11 +147,22 @@ def migrate(connection: sqlite3.Connection) -> None:
             SELECT DISTINCT report_version_id, crash_id FROM crash_locations
             UNION SELECT report_version_id, crash_id FROM snapshot_reports
         """).fetchall()
-        for row in pairs:
+        for row in progress_items(
+            pairs,
+            on_progress,
+            "migrate-v3-reports",
+            "Reparsing stored crash reports",
+            total=len(pairs),
+        ):
             location_store.index_report(connection, int(row[0]), int(row[1]))
-        for row in connection.execute(
-            "SELECT id FROM patch_versions WHERE is_valid = 1"
-        ).fetchall():
+        patches = connection.execute("SELECT id FROM patch_versions WHERE is_valid = 1").fetchall()
+        for row in progress_items(
+            patches,
+            on_progress,
+            "migrate-v3-patches",
+            "Reparsing stored patches",
+            total=len(patches),
+        ):
             location_store.index_patch(connection, int(row[0]))
         connection.execute("PRAGMA user_version = 3")
         validate(connection)
@@ -157,6 +170,7 @@ def migrate(connection: sqlite3.Connection) -> None:
     except BaseException:
         connection.rollback()
         raise
+    report_progress(on_progress, "migrate-v3", "Database schema 3 committed", 1, 1)
 
 
 def consistency_errors(connection: sqlite3.Connection) -> list[str]:
