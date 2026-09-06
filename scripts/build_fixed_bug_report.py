@@ -644,14 +644,14 @@ def main() -> None:
     add("### Crash-site extraction")
     add("")
     add(
-        "The crash site is the kernel manifestation point, not automatically the literal machine RIP printed first in the log. The parser applies detector-specific rules:"
+        "The crash site is the kernel manifestation point, not automatically the literal machine RIP printed first in the log. Other-task and unwind traces remain in the saved full stack but cannot supply missing crash coordinates. The parser applies detector-specific rules:"
     )
     add("")
     add(
-        "- **KASAN, KMSAN, and KFENCE:** skip reporting/instrumentation helpers and bind the normalized title function to a symbolized kernel frame. Allocation, free, and origin sections may recover a missing file path for the titled function, but they are not substituted for the manifestation stack."
+        "- **KASAN, KMSAN, and KFENCE:** prefer an explicit access coordinate, otherwise bind the normalized title function to a symbolized manifestation frame. Allocation, free, and origin sections cannot supply missing crash coordinates."
     )
     add(
-        "- **UBSAN:** prefer the explicit `file:line:column` expression location and bind it to the enclosing/titled function."
+        "- **UBSAN:** prefer the explicit `file:line:column` expression location; record a function only when the same coordinate is symbolized."
     )
     add(
         "- **KCSAN:** retain both conflicting access sites; the first normalized access is the primary CS and the second is recorded separately."

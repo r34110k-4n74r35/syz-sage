@@ -356,6 +356,10 @@ including historical report associations. It corrects crash coordinates that
 were inferred from those auxiliary traces. The repair uses SQLite's saved
 report bytes; no download, new snapshot, or patch reindexing is needed.
 
+Schema version 6 prevents other-task backtraces and unwind dumps from supplying
+a missing crash coordinate. It repairs current and historical report associations
+from saved report bytes, preserving the full stack and leaving patches unchanged.
+
 Read-only `show`, `list`, `filter`, `status`, and `check` report when migration is
 required. Run `ss migrate` before retrying them. Writable opens during update
 or import can perform the upgrade automatically. See

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import random
 import threading
@@ -12,6 +13,7 @@ from collections import deque
 from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from syz_sage import __version__
@@ -117,6 +119,70 @@ def normalize_patch_repository(repo: str | None) -> tuple[str, str]:
 _normalize_patch_repository = normalize_patch_repository
 
 
+class _ValidatedRequest(urllib.request.Request):
+    """Carry this request's URL policy through urllib redirect chains."""
+
+    def __init__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        validate: Callable[[str], None],
+        *,
+        origin_req_host: str | None = None,
+        unverifiable: bool = False,
+    ) -> None:
+        super().__init__(
+            url, headers=headers, origin_req_host=origin_req_host, unverifiable=unverifiable
+        )
+        self.validate = validate
+
+
+class _ValidatedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    # Run before an existing default handler when an opener was supplied.
+    handler_order = urllib.request.HTTPRedirectHandler.handler_order - 1
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        if isinstance(req, _ValidatedRequest):
+            req.validate(newurl)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and isinstance(req, _ValidatedRequest):
+            return _ValidatedRequest(
+                redirected.full_url,
+                dict(redirected.header_items()),
+                req.validate,
+                origin_req_host=redirected.origin_req_host,
+                unverifiable=redirected.unverifiable,
+            )
+        return redirected
+
+    def http_error_302(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+    ) -> Any:
+        try:
+            return super().http_error_302(req, fp, code, msg, headers)
+        except BaseException:
+            # urllib closes accepted redirects, but validation, cancellation,
+            # or malformed Location parsing may raise before its cleanup.
+            with contextlib.suppress(Exception):
+                fp.close()
+            raise
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
 class SyzbotClient:
     """Retrieve listings, bug metadata, reports, and kernel patches."""
 
@@ -135,7 +201,9 @@ class SyzbotClient:
             raise ValueError("dashboard URL must not contain a query or fragment")
         self.dashboard = normalized_dashboard
         self.retry = retry or RetryPolicy()
-        self.opener = opener or urllib.request.build_opener()
+        self.opener = opener or urllib.request.build_opener(_ValidatedRedirectHandler())
+        if opener is not None:
+            self.opener.add_handler(_ValidatedRedirectHandler())
         self.limiter = limiter or WindowRateLimiter()
         self.sleep = sleep or time.sleep
         self._interruptible_sleep = sleep is None or sleep is time.sleep
@@ -166,8 +234,14 @@ class SyzbotClient:
     def get(
         self, url: str, *, dashboard_request: bool = False, timeout: float | None = None
     ) -> bytes:
-        validate_http_url(url, same_origin_as=self.dashboard if dashboard_request else None)
-        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        origin = self.dashboard if dashboard_request else None
+        validate_http_url(url, same_origin_as=origin)
+
+        def validate_redirect(target: str) -> None:
+            self._check_cancelled()
+            validate_http_url(target, same_origin_as=origin)
+
+        request = _ValidatedRequest(url, {"User-Agent": USER_AGENT}, validate_redirect)
         last_error: BaseException | None = None
         for attempt in range(self.retry.attempts):
             self._check_cancelled()
@@ -176,6 +250,9 @@ class SyzbotClient:
             self._check_cancelled()
             try:
                 with self.opener.open(request, timeout=timeout or self.retry.timeout) as response:
+                    final_url = response.geturl()
+                    if isinstance(final_url, str):
+                        validate_redirect(final_url)
                     payload: object = response.read()
                     self._check_cancelled()
                     if not isinstance(payload, bytes):

@@ -132,6 +132,33 @@ class ResearchScriptRegressions(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("current catalog is required", errors.getvalue())
 
+    def test_retained_slash_timestamps_produce_iso_dates_and_precise_elapsed_days(self) -> None:
+        alpha = self.analyze()["bugs"][0]
+        self.assertEqual(alpha["first_crash"], "2026-07-01")
+        self.assertEqual(alpha["fix_time"], "2026-08-01")
+        self.assertEqual(alpha["days_first_to_fix"], 31.1)
+
+    def test_iso_timestamp_offsets_are_used_and_missing_timezone_is_not_invented(self) -> None:
+        detail = self.read_json(self.alpha_path)
+        detail["first-crash"] = "2026-07-01T09:00:00+02:00"
+        detail["fix-time"] = "2026-07-01T12:00:00Z"
+        self.write_json(self.alpha_path, detail)
+        self.assertEqual(self.analyze()["bugs"][0]["days_first_to_fix"], 0.2)
+        detail["first-crash"] = "2026/07/01 09:00"
+        self.write_json(self.alpha_path, detail)
+        self.assertEqual(self.analyze()["bugs"][0]["days_first_to_fix"], "")
+
+    def test_invalid_and_partial_dates_stay_unknown(self) -> None:
+        for value in (None, "", "2026-07", "2026/02/30 09:00", "not a date"):
+            with self.subTest(value=value):
+                self.assertEqual(analyze_fixed_bugs.date_only(value), "")
+        detail = self.read_json(self.alpha_path)
+        detail["first-crash"] = "2026/02/30 09:00"
+        self.write_json(self.alpha_path, detail)
+        alpha = self.analyze()["bugs"][0]
+        self.assertEqual(alpha["first_crash"], "")
+        self.assertEqual(alpha["days_first_to_fix"], "")
+
     def test_listing_only_fix_is_included_when_detail_has_no_fix(self) -> None:
         detail = self.read_json(self.alpha_path)
         detail["fix-commits"] = []

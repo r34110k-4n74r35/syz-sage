@@ -298,7 +298,7 @@ def cmd_status(bugs: list[dict]) -> None:
     )
 
 
-def cmd_patches(bugs: list[dict], limit: int | None) -> None:
+def cmd_patches(bugs: list[dict], limit: int | None, workers: int = 8) -> None:
     jobs = collect_patch_jobs(bugs)
     jobs = [(h, repo) for h, repo in jobs if not patch_ok(h) or _pending("patches", h)]
     if limit:
@@ -309,7 +309,7 @@ def cmd_patches(bugs: list[dict], limit: int | None) -> None:
         print("patches already complete")
         return
     for done, (_, future) in enumerate(
-        bounded_results(jobs, lambda job: fetch_patch(*job), workers=8, cancel=CLIENT.cancel),
+        bounded_results(jobs, lambda job: fetch_patch(*job), workers=workers, cancel=CLIENT.cancel),
         start=1,
     ):
         try:
@@ -495,7 +495,7 @@ def main() -> None:
         ensure_dirs()
         bugs = load_catalog()
         if args.patches or args.all:
-            cmd_patches(bugs, args.limit if args.patches and not args.all else None)
+            cmd_patches(bugs, args.limit if args.patches and not args.all else None, args.workers)
         if args.syzbot or args.all:
             cmd_syzbot(
                 bugs,

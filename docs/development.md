@@ -53,7 +53,7 @@ inside `database/`:
 | Blob/document writes and normalized child records | [database/writes.py](../src/syz_sage/database/writes.py) |
 | Bug/filter queries, coverage, and integrity checks | [database/queries.py](../src/syz_sage/database/queries.py) |
 | Derived-location indexing and v2 migration | [database/location_store.py](../src/syz_sage/database/location_store.py) |
-| Subsequent schema migrations | [database/schema_v3.py](../src/syz_sage/database/schema_v3.py), [database/schema_v4.py](../src/syz_sage/database/schema_v4.py), [database/schema_v5.py](../src/syz_sage/database/schema_v5.py) |
+| Subsequent schema migrations | [database/schema_v3.py](../src/syz_sage/database/schema_v3.py), [database/schema_v4.py](../src/syz_sage/database/schema_v4.py), [database/schema_v5.py](../src/syz_sage/database/schema_v5.py), [database/schema_v6.py](../src/syz_sage/database/schema_v6.py) |
 
 The snapshot transaction stays together so its validation, source retention,
 and activation rules can be reviewed as one operation. The smaller preparation,
@@ -117,6 +117,11 @@ be mistaken for complete data. `location_store.py` connects prepared parser
 results to report, crash, and patch versions. No parser needs a network
 connection to derive a location.
 
+Dashboard requests validate their HTTP(S) origin both at the initial URL and
+before every redirect. Patch and research requests permit HTTP(S) redirects to
+other origins. Redirects keep cancellation checks active and release rejected
+response bodies.
+
 The rolling mirror can contain successful downloads from a partial attempt
 while inspection still uses the previous complete snapshot. Keep that
 distinction when adding a query or research workflow. Raw payloads are evidence;
@@ -172,8 +177,9 @@ counts as an unchanged mirror.
 The input membership and file stamps are checked against that fingerprint
 before indexing and before candidate activation. An external edit during
 ingestion prevents a stale fingerprint from being recorded for different data.
-`show` and `filter` hold a read transaction across related queries so a concurrent
-update cannot mix metadata and locations from different snapshots.
+`show`, `filter`, `status`, `check`, and unchanged-import summaries hold a read
+transaction across related queries so a concurrent update cannot mix metadata,
+locations, or counts from different snapshots.
 
 After saving a downloaded file, the coordinator verifies the on-disk bytes
 before recording its parsed representation. An external edit between save and
@@ -224,8 +230,8 @@ rows are versioned by parser revision; changing the parser alone does not
 repair a user's already indexed data. Provide an explicit transactional
 reindexing/migration path when stored interpretation changes.
 
-Report and patch parsers have separate revision constants. Schema v5 uses
-report revision 3 and patch revision 2; a report-only repair does not reindex
+Report and patch parsers have separate revision constants. Schema v6 uses
+report revision 4 and patch revision 2; a report-only repair does not reindex
 unchanged patch locations.
 
 For an ingestion change, preserve complete-snapshot activation, retries across
@@ -296,7 +302,7 @@ Before finishing a behavioral change, run the full suite and existing checks:
 
 ```console
 PYTHONPATH=src python -m unittest discover -s tests -t . -q
-node --test tests/project/test_project_paths.mjs
+node --test tests/project/test_project_paths.mjs tests/workflows/test_workbook_values.mjs
 ruff check src tests scripts
 ruff format --check src tests scripts
 ```
@@ -304,8 +310,8 @@ ruff format --check src tests scripts
 The Python suite uses small fixtures and mocked network responses rather than
 the downloaded corpus or live syzbot service. Python 3.10 needs the `tomli`
 dependency from the development extra for packaging metadata tests. The Node
-test exercises JavaScript path resolution without requiring the optional
-workbook-export dependency. Strict type checking covers application modules;
+tests exercise JavaScript path resolution and workbook date values without
+requiring the optional workbook-export dependency. Strict type checking covers application modules;
 research scripts have their own runtime checks.
 
 For optional static type checking:

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from syz_sage.cli.commands import _import_lock_root
-from syz_sage.database import Database
+from syz_sage.database import SCHEMA_VERSION, Database
 from syz_sage.project.config import DataPaths
 from syz_sage.retrieval.sync import _exclusive_update_lock
 from tests.cli.support import CliFixture, compact, invoke
@@ -113,7 +113,7 @@ class CliMaintenanceTests(CliFixture, unittest.TestCase):
             database.connection.execute("PRAGMA user_version=4")
         code, stdout, stderr = invoke(["--database", str(self.database), "migrate"])
         self.assertEqual(code, 0, stderr or stdout)
-        self.assertIn("Migration: schema 4 -> 5", compact(stdout))
+        self.assertIn(f"Migration: schema 4 -> {SCHEMA_VERSION}", compact(stdout))
         self.assertIn("Reparsing stored crash reports", stderr)
         self.assertNotIn("\r", stderr)
         self.assertNotIn("\x1b", stderr)

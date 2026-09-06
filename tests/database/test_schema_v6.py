@@ -12,16 +12,15 @@ from syz_sage.database import SCHEMA_VERSION, Database, location_store
 from syz_sage.project.storage import temporary_directory
 from tests.support import FIXTURES
 
-REPORT = """BUG: KMSAN: uninit-value in access
- access+0x1/0x2
-Uninit was stored to memory at:
- access+0x5/0x9 drivers/example.c:42
-Uninit was created at:
- allocate+0x1/0x2 mm/slab.c:100
+REPORT = """BUG: KASAN: use-after-free in victim
+Call Trace:
+ victim+0x10/0x20
+Backtrace of CPU 1:
+ victim+0x20/0x40 drivers/example.c:200
 """
 
 
-class SchemaV5Tests(unittest.TestCase):
+class SchemaV6Tests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = temporary_directory()
         self.addCleanup(temporary.cleanup)
@@ -31,68 +30,64 @@ class SchemaV5Tests(unittest.TestCase):
         shutil.copytree(FIXTURES, self.data)
         detail_path = self.data / "raw/bugs/extid-alpha123.json"
         detail = json.loads(detail_path.read_bytes())
-        detail["title"] = detail["crashes"][0]["title"] = "KMSAN: uninit-value in access"
+        detail["title"] = detail["crashes"][0]["title"] = "KASAN: use-after-free in victim"
         detail_path.write_text(json.dumps(detail))
         report_path = self.data / "artifacts/reports/extid-alpha123.txt"
         with Database(self.path) as database:
-            for line in (42, 43):
-                report_path.write_text(REPORT.replace(":42", f":{line}"))
+            for line in (200, 201):
+                report_path.write_text(REPORT.replace(":200", f":{line}"))
                 self.assertEqual(database.ingest_files(self.data)["status"], "completed")
-            # Recreate v4's bad derived data without changing any source blobs.
+            # Recreate schema5's wrong extraction; source blobs/associations remain intact.
             database.connection.execute(
-                "UPDATE crash_locations SET parser_version=2, "
-                "file_path='drivers/example.c', line_number=42"
+                "UPDATE crash_locations SET parser_version=3, "
+                "file_path='drivers/example.c', line_number=200"
             )
-            database.connection.execute(
-                "UPDATE crash_stack_frames SET parser_version=2, section='manifestation'"
-            )
-            database.connection.execute("PRAGMA user_version=4")
+            database.connection.execute("UPDATE crash_stack_frames SET parser_version=3")
+            database.connection.execute("PRAGMA user_version=5")
 
-    def preserved_rows(self) -> dict[str, list[tuple]]:
+    def preserved_tables(self) -> dict[str, list[tuple]]:
         with contextlib.closing(sqlite3.connect(self.path)) as connection:
-            return {
-                table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
-                for table in (
-                    "blobs",
-                    "sync_runs",
-                    "snapshots",
-                    "bugs",
-                    "bug_versions",
-                    "snapshot_bugs",
-                    "snapshot_reports",
-                    "snapshot_patches",
-                    "fix_locations",
-                    "app_state",
+            tables = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
                 )
+                if row[0] not in {"crash_locations", "crash_stack_frames"}
+            ]
+            return {
+                table: connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
+                for table in tables
             }
 
-    def test_migration_repairs_history_from_sqlite_and_preserves_sources_and_membership(
+    def test_migration_repairs_current_and_historical_locations_without_touching_evidence(
         self,
     ) -> None:
-        preserved = self.preserved_rows()
+        preserved = self.preserved_tables()
         shutil.rmtree(self.data)
         with Database(self.path) as database:
             locations = database.connection.execute("SELECT * FROM crash_locations").fetchall()
             self.assertEqual(len(locations), 2)
             self.assertTrue(all(row["line_number"] is None for row in locations))
-            self.assertTrue(
-                all(
-                    row["parser_version"] == location_store.REPORT_PARSER_VERSION
-                    for row in locations
-                )
-            )
+            self.assertTrue(all(row["file_path"] is None for row in locations))
+            self.assertTrue(all(row["parser_version"] == 4 for row in locations))
             frames = database.connection.execute(
-                "SELECT section FROM crash_stack_frames WHERE report_line=4"
+                "SELECT section, line_number FROM crash_stack_frames WHERE report_line=5 "
+                "ORDER BY line_number"
             ).fetchall()
-            self.assertEqual([row[0] for row in frames], ["origin", "origin"])
+            self.assertEqual(
+                [tuple(row) for row in frames], [("other-task", 200), ("other-task", 201)]
+            )
+            bug = database.get_bug("extid-alpha123")
+            self.assertIn("drivers/example.c:201", bug["report"]["text"])
+            self.assertIsNone(bug["crash_locations"][0]["line_number"])
             self.assertEqual(database.status()["schema_version"], SCHEMA_VERSION)
             self.assertTrue(database.health_check()["ok"])
             changes = database.connection.total_changes
             database.initialize()
             self.assertEqual(database.connection.total_changes, changes)
-        self.assertEqual(self.preserved_rows(), preserved)
+        self.assertEqual(self.preserved_tables(), preserved)
 
-    def test_read_only_requires_explicit_migration_without_writing(self) -> None:
+    def test_read_only_requires_migration_without_writing(self) -> None:
         before = self.path.read_bytes(), self.path.stat().st_mtime_ns
         with (
             self.assertRaisesRegex(RuntimeError, "ss migrate"),
@@ -101,9 +96,9 @@ class SchemaV5Tests(unittest.TestCase):
             pass
         self.assertEqual((self.path.read_bytes(), self.path.stat().st_mtime_ns), before)
 
-    def test_failed_reparse_rolls_back_all_derived_rows_and_schema_version(self) -> None:
+    def test_failed_reparse_rolls_back_locations_stacks_and_schema_version(self) -> None:
         with contextlib.closing(sqlite3.connect(self.path)) as connection:
-            before = connection.execute("SELECT * FROM crash_locations ORDER BY id").fetchall()
+            before = connection.execute("SELECT * FROM crash_locations ORDER BY rowid").fetchall()
             frames = connection.execute(
                 "SELECT * FROM crash_stack_frames ORDER BY rowid"
             ).fetchall()
@@ -124,9 +119,10 @@ class SchemaV5Tests(unittest.TestCase):
         ):
             pass
         with contextlib.closing(sqlite3.connect(self.path)) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
             self.assertEqual(
-                connection.execute("SELECT * FROM crash_locations ORDER BY id").fetchall(), before
+                connection.execute("SELECT * FROM crash_locations ORDER BY rowid").fetchall(),
+                before,
             )
             self.assertEqual(
                 connection.execute("SELECT * FROM crash_stack_frames ORDER BY rowid").fetchall(),

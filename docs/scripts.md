@@ -45,7 +45,8 @@ explicitly request an analysis or export there.
 `common.py` supplies project paths and the shared `SyzbotClient`; its URL
 helpers and atomic writes delegate to the application modules. Detail, report,
 and patch retrieval uses the same artifact validation and bounded worker
-helper as the CLI. `project_paths.mjs` supplies JavaScript path resolution.
+helper as the CLI. `project_paths.mjs` supplies JavaScript path resolution, and
+`workbook_values.mjs` validates dates and elapsed-time values for export.
 The `.mjs` workbook builder sits beside its Python launcher. These helper files
 are not separate user commands.
 
@@ -84,6 +85,11 @@ resolutions by bug, subject, and repository, and count each patch hash once.
 Its JSON includes bug results, patch hunks, a cohort
 manifest, and coverage/exclusion information. The Markdown builder consumes
 that analysis rather than rerunning retrieval.
+
+The analyzer accepts saved syzbot `YYYY/MM/DD` timestamps and ISO timestamps.
+Exported calendar dates use `YYYY-MM-DD`; elapsed days use the complete timestamps
+so the workbook and report agree. Missing or invalid dates remain blank, as do
+intervals whose timestamps have incompatible timezone information.
 
 Crash-to-fix classifications and distance estimates are research heuristics.
 Review their evidence and exclusions before drawing conclusions; path-based

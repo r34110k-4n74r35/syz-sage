@@ -238,6 +238,11 @@ def _current_effective_fixes(database: Database) -> dict[int, list[dict[str, Any
 def status(database: Database) -> dict[str, Any]:
     """Return JSON-serializable coverage and snapshot statistics."""
     database.initialize()
+    with database._read_transaction():
+        return _status(database)
+
+
+def _status(database: Database) -> dict[str, Any]:
     connection = database.connection
     current = connection.execute(
         """
@@ -674,6 +679,11 @@ def _get_bug(database: Database, key: str) -> dict[str, Any] | None:
 def health_check(database: Database) -> dict[str, Any]:
     """Check SQLite integrity, foreign keys, snapshots, and blob hashes."""
     database.initialize()
+    with database._read_transaction():
+        return _health_check(database)
+
+
+def _health_check(database: Database) -> dict[str, Any]:
     connection = database.connection
     report_progress(database._on_progress, "check-sqlite", "Checking SQLite integrity", 0, 2)
     quick_rows = [row[0] for row in connection.execute("PRAGMA quick_check")]

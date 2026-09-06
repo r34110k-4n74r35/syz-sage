@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { writablePath } from "./project_paths.mjs";
+import { bugDateValues } from "./workbook_values.mjs";
 
 const [analysisPath, requestedOutput, requestedPreviews] = process.argv.slice(2);
 if (!analysisPath || !requestedOutput || !requestedPreviews) {
@@ -95,7 +96,7 @@ async function buildWorkbook() {
   readme.getRange("A5").values = [["Study definitions"]];
   styleSection(readme.getRange("A5:H5"));
   readme.getRange("A6:B10").values = [
-    ["Crash site (CS)", "Manifestation source location. Sanitizer runtime frames are skipped; explicit UBSAN locations and symbolized application frames are preferred."],
+    ["Crash site (CS)", "Manifestation source location. Sanitizer runtime frames are skipped; explicit access locations and symbolized application frames are preferred. Other-task and unwind traces cannot supply missing crash coordinates."],
     ["Fix site (FS)", "Changed source hunks in every available fix commit. The bug-level structural grade is the maximum hunk grade, as requested."],
     ["Structural D", "D0 exact/adjacent changed statement; D1 same function; D2 same file; D3 same component; D4 same subsystem; D5 cross-subsystem."],
     ["Stack S", "Frame-edge distance from CS to the nearest extracted fixed function on the manifestation stack; ∞ means off-stack; unknown means the FS function or stack was unavailable."],
@@ -105,8 +106,8 @@ async function buildWorkbook() {
   readme.getRange("B6:B10").format = { wrapText: true, verticalAlignment: "top", font: { name: "Aptos", size: 10, color: COLORS.ink } };
   readme.getRange("A12:H12").merge(); readme.getRange("A12").values = [["Sanitizer-aware CS selection"]]; styleSection(readme.getRange("A12:H12"));
   readme.getRange("A13:B18").values = [
-    ["KASAN/KMSAN/KFENCE", "Match the normalized title function to the symbolized manifestation stack; do not use the instrumentation RIP. If only an origin section has file:line, it is used solely to recover the titled function's path, at medium confidence."],
-    ["UBSAN", "Use the explicit file:line:column expression location, then bind it to the titled/enclosing function."],
+    ["KASAN/KMSAN/KFENCE", "Prefer an explicit access coordinate, otherwise match the normalized title function to the symbolized manifestation stack. Allocation, free, and origin frames cannot supply missing crash coordinates."],
+    ["UBSAN", "Use the explicit file:line:column expression location; record a function only when the same coordinate is symbolized."],
     ["KCSAN", "Record both conflicting access functions/locations; the primary CS is the first normalized access site."],
     ["BUG/WARN/lockdep", "Prefer explicit BUG/WARNING source locations or the normalized title function on the symbolized stack."],
     ["Ordinary oops", "Match the kernel RIP/PC symbol to a symbolized source frame; user-space RIP is ignored."],
@@ -214,9 +215,8 @@ async function buildWorkbook() {
   ];
   const bugIndex = Object.fromEntries(bugHeaders.map((h, i) => [h, i + 1]));
   const bugCol = h => colLetter(bugIndex[h]);
-  const dateValue = s => s ? new Date(`${s}T00:00:00Z`) : null;
   const bugRows = bugs.map(b => [
-    b.bug_key, b.title, b.bug_url, b.status, dateValue(b.first_crash), dateValue(b.last_crash), dateValue(b.fix_time), dateValue(b.close_time), null,
+    b.bug_key, b.title, b.bug_url, b.status, ...bugDateValues(b),
     b.detector, b.bug_family, b.bug_type, b.access_mode, b.cs_function, b.cs_path, b.cs_line, b.cs_location, b.cs_component, b.cs_subsystem,
     b.cs_strategy, b.cs_confidence, b.cs_secondary_function, b.cs_secondary_location, b.fix_commit_count, b.fix_hashes, b.fix_commit_urls,
     b.patch_titles, b.fix_paths, b.fix_functions, b.fix_hunk_count, b.patch_additions, b.patch_deletions, b.patch_type, b.patch_action,
@@ -228,8 +228,6 @@ async function buildWorkbook() {
   const bugLastRow = bugRows.length + 1, bugLastCol = colLetter(bugHeaders.length);
   bugSheet.getRange(`A1:${bugLastCol}${bugLastRow}`).values = [bugHeaders, ...bugRows];
   styleHeader(bugSheet.getRange(`A1:${bugLastCol}1`));
-  bugSheet.getRange(`${bugCol("Days first→fix")}2`).formulas = [[`=IF(OR(${bugCol("First crash")}2="",${bugCol("Fix time")}2=""),"",${bugCol("Fix time")}2-${bugCol("First crash")}2)`]];
-  bugSheet.getRange(`${bugCol("Days first→fix")}2:${bugCol("Days first→fix")}${bugLastRow}`).fillDown();
   bugSheet.getRange(`${bugCol("Full annotation")}2`).formulas = [[`=IF(${bugCol("Distance label")}2="Unresolved","Unresolved",LEFT(${bugCol("Distance label")}2,2)&"/S="&${bugCol("Stack distance S")}2&"/Δt="&${bugCol("Temporal distance Δt")}2)`]];
   bugSheet.getRange(`${bugCol("Full annotation")}2:${bugCol("Full annotation")}${bugLastRow}`).fillDown();
   bugSheet.getRange(`${bugCol("First crash")}2:${bugCol("Close time")}${bugLastRow}`).format.numberFormat = "yyyy-mm-dd";
@@ -546,7 +544,7 @@ async function buildWorkbook() {
   const manual = bugs.filter(b => b.review_status !== "Automated classification");
   const qc = workbook.worksheets.add("QC"); baseSheet(qc);
   setTitle(qc, qc.getRange("A1:I1"), "Quality Control and Manual-Review Queue");
-  qc.getRange("A3:D7").values = [["Metric","Value","Share","Meaning"],["CS high confidence",null,null,"Explicit source or title function matched to symbolized stack"],["CS medium confidence",null,null,"Ordinary title match or path recovered outside manifestation frames"],["Manual review queue",manual.length,null,"Unresolved CS/distance or missing FS function"],["Structurally unresolved",null,null,"No symbolized CS path in the downloaded report"]]; styleHeader(qc.getRange("A3:D3"));
+  qc.getRange("A3:D7").values = [["Metric","Value","Share","Meaning"],["CS high confidence",null,null,"Explicit source or title function matched to symbolized stack"],["CS medium confidence",null,null,"Ordinary title match or labeled KCSAN access stack"],["Manual review queue",manual.length,null,"Unresolved CS/distance or missing FS function"],["Structurally unresolved",null,null,"No symbolized CS path in the downloaded report"]]; styleHeader(qc.getRange("A3:D3"));
   qc.getRange("B4").formulas = [[`=COUNTIF('Bugs'!$${bugCol("CS confidence")}$2:$${bugCol("CS confidence")}$${bugLastRow},"high")`]];
   qc.getRange("B5").formulas = [[`=COUNTIF('Bugs'!$${bugCol("CS confidence")}$2:$${bugCol("CS confidence")}$${bugLastRow},"medium")`]];
   qc.getRange("B7").formulas = [[`=COUNTIF(${dlRange},"Unresolved")`]];

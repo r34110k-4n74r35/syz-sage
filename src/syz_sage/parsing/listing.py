@@ -124,7 +124,7 @@ def _http_url_parts(url: str) -> SplitResult:
 def _origin(parsed: SplitResult) -> tuple[str, str, int]:
     scheme = parsed.scheme.lower()
     assert parsed.hostname is not None
-    port = parsed.port or (443 if scheme == "https" else 80)
+    port = parsed.port if parsed.port is not None else (443 if scheme == "https" else 80)
     return scheme, parsed.hostname.lower(), port
 
 

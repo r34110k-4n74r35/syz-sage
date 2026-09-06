@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 DEFAULT_SOURCE_URL = "https://syzkaller.appspot.com/upstream/fixed?json=1"

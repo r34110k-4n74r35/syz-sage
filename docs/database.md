@@ -17,7 +17,7 @@
 The default database is `data/db/syz_sage.sqlite3` in the owning checkout.
 An explicit `--database` or data-root override can select another location;
 see [path configuration](usage.md#paths-and-write-boundaries).
-Schema version 5 keeps titles, diagnostic types,
+Schema version 6 keeps titles, diagnostic types,
 subsystem tags, crash sites, complete extracted stacks, and fix sites queryable.
 The original downloaded JSON, reports, and patches remain in `blobs`.
 
@@ -247,9 +247,11 @@ a missing crash line.
 
 Stack frames preserve report order, inline frames, and separate manifestation,
 allocation, free, origin, and other-task sections when those headings are
-available. KMSAN's `Uninit was stored to memory at:` traces are origin history;
+available. Unwind dumps are retained in their own section. KMSAN's
+`Uninit was stored to memory at:` traces are origin history;
 `page last allocated` and `page last free stack trace` identify page history.
-These frames cannot supply a missing crash coordinate. Unsymbolized frames
+These auxiliary traces, other-task backtraces, and unwind dumps cannot supply
+a missing crash coordinate. Unsymbolized frames
 keep their raw text and unknown fields. The
 complete report text remains the source of truth for unusual formats and is
 available through `ss show KEY --report` or JSON with `--report`.
@@ -334,6 +336,11 @@ raw reports, patches, snapshot membership, and synchronization history are
 unchanged. Read-only commands require an explicit `ss migrate` before opening
 an older database.
 
+The v5-to-v6 migration uses report parser revision 4 to prevent other-task
+backtraces and unwind dumps from supplying the failing operation's coordinates.
+It reparses current and historical report associations transactionally, retaining
+the full extracted stacks and original source blobs. Patches remain at revision 2.
+
 Version 2 did not retain artifact pointers for every historical snapshot.
 Migration backfills associations for the active snapshot where ownership can
 be established, and keeps older source versions and derived rows. It does not
@@ -372,5 +379,6 @@ is unambiguous.
 `ss check` verifies SQLite structure, foreign keys, blob sizes and SHA-256
 hashes, active membership counts, stored bug types against snapshot titles,
 and artifact ownership/extraction consistency.
-It reads the database without modifying it. It does not validate against the
+It reads one consistent database snapshot without modifying it, including when
+an update commits concurrently. It does not validate against the
 current syzbot website or prove that every possible report format was parsed.

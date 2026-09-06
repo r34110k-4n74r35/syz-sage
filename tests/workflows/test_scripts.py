@@ -143,6 +143,24 @@ class ScriptRetrievalTests(unittest.TestCase):
         self.assertEqual(self.paths.listing_html.read_bytes(), before[1])
         self.assertEqual(list(self.paths.raw.glob("*.tmp")), [])
 
+    def test_requested_worker_count_applies_to_patch_and_all_modes(self) -> None:
+        for mode, workers in (("--patches", 1), ("--all", 3)):
+            with (
+                self.subTest(mode=mode, workers=workers),
+                mock.patch.object(sys, "argv", ["fetch", mode, "--workers", str(workers)]),
+                mock.patch.object(
+                    fetch_artifacts, "collect_patch_jobs", return_value=[("b" * 40, None)]
+                ),
+                mock.patch.object(fetch_artifacts, "bounded_results", return_value=[]) as results,
+                mock.patch.object(fetch_artifacts, "cmd_syzbot") as syzbot,
+            ):
+                fetch_artifacts.main()
+                self.assertEqual(results.call_args.kwargs["workers"], workers)
+                if mode == "--all":
+                    self.assertEqual(syzbot.call_args.args[4], workers)
+                else:
+                    syzbot.assert_not_called()
+
     def test_listing_writer_uses_the_same_update_lock(self) -> None:
         with (
             _exclusive_update_lock(self.paths.root),

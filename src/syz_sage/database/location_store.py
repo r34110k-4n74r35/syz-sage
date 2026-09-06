@@ -19,7 +19,7 @@ from ..parsing.listing import parse_subsystem_tags
 from ..parsing.patch import FixLocation, extract_fix_locations
 from ..project.progress_events import ProgressCallback, progress_items, report_progress
 
-REPORT_PARSER_VERSION = 3
+REPORT_PARSER_VERSION = 4
 PATCH_PARSER_VERSION = 2
 
 

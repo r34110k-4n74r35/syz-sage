@@ -115,12 +115,12 @@ class DatabaseProgressTests(unittest.TestCase):
     def test_migration_reparse_counts_and_completion_follow_actual_commit(self) -> None:
         with Database(self.path) as database:
             database.ingest_files(self.data)
-            database.connection.execute("PRAGMA user_version=4")
+            database.connection.execute("PRAGMA user_version=5")
         observed_versions: list[int] = []
 
         def observe(event: ProgressEvent) -> None:
             self.events.append(event)
-            if event.phase == "migrate-v5" and event.completed == 1:
+            if event.phase == "migrate-v6" and event.completed == 1:
                 with contextlib.closing(sqlite3.connect(self.path)) as reader:
                     observed_versions.append(reader.execute("PRAGMA user_version").fetchone()[0])
 
@@ -128,7 +128,7 @@ class DatabaseProgressTests(unittest.TestCase):
             self.assertEqual(database.status()["schema_version"], SCHEMA_VERSION)
             self.assertEqual(observed_versions, [SCHEMA_VERSION])
             self.assertEqual(
-                [(event.completed, event.total) for event in self.phase("migrate-v5-reports")],
+                [(event.completed, event.total) for event in self.phase("migrate-v6-reports")],
                 [(0, 1), (1, 1)],
             )
             self.events.clear()
@@ -138,18 +138,18 @@ class DatabaseProgressTests(unittest.TestCase):
     def test_failed_migration_has_no_committed_event_and_preserves_old_schema(self) -> None:
         with Database(self.path) as database:
             database.ingest_files(self.data)
-            database.connection.execute("PRAGMA user_version=4")
+            database.connection.execute("PRAGMA user_version=5")
         with (
             mock.patch.object(location_store, "index_report", side_effect=RuntimeError("parser")),
             self.assertRaisesRegex(RuntimeError, "parser"),
             Database(self.path, on_progress=self.events.append),
         ):
             pass
-        self.assertEqual([event.completed for event in self.phase("migrate-v5")], [None])
-        self.assertIsNone(self.phase("migrate-v5")[0].total)
-        self.assertEqual([event.completed for event in self.phase("migrate-v5-reports")], [0])
+        self.assertEqual([event.completed for event in self.phase("migrate-v6")], [None])
+        self.assertIsNone(self.phase("migrate-v6")[0].total)
+        self.assertEqual([event.completed for event in self.phase("migrate-v6-reports")], [0])
         with contextlib.closing(sqlite3.connect(self.path)) as reader:
-            self.assertEqual(reader.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(reader.execute("PRAGMA user_version").fetchone()[0], 5)
 
     def test_broken_observer_does_not_change_ingestion_or_health_results(self) -> None:
         calls = 0

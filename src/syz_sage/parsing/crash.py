@@ -161,6 +161,8 @@ _MEMORY_HEADING = re.compile(
     r"The buggy address (?:belongs|is located)|Memory state around|page_owner tracks the page",
     re.I,
 )
+_OTHER_TASK_HEADING = re.compile(r"(?:stack backtrace|backtrace) of (?:CPU|task)", re.I)
+_UNWIND_HEADING = re.compile(r"unwind stack type:", re.I)
 
 
 def _auxiliary_section(line: str) -> str | None:
@@ -171,12 +173,17 @@ def _auxiliary_section(line: str) -> str | None:
 
 
 def split_manifestation_report(report: str) -> tuple[str, str, str]:
-    """Keep origin and allocation history out of the failing access's frames."""
+    """Keep auxiliary history and diagnostic stacks out of the failing access."""
     boundaries: list[tuple[int, int, str | None]] = []
     offset = 0
     for line in report.splitlines(keepends=True):
         section = _auxiliary_section(line)
-        if section or _MEMORY_HEADING.search(line):
+        if (
+            section
+            or _MEMORY_HEADING.search(line)
+            or _OTHER_TASK_HEADING.search(line)
+            or _UNWIND_HEADING.search(line)
+        ):
             boundaries.append((offset, offset + len(line), section))
         offset += len(line)
     main = report[: boundaries[0][0]] if boundaries else report
@@ -495,9 +502,9 @@ def extract_stack_frames(report: str) -> list[StackFrame]:
             section = auxiliary
         elif _KCSAN_ACCESS_RE.match(raw):
             section = "conflicting-access"
-        elif re.search(r"(?:stack backtrace|backtrace) of (?:CPU|task)", raw, re.I):
+        elif _OTHER_TASK_HEADING.search(raw):
             section = "other-task"
-        elif "unwind stack type:" in raw:
+        elif _UNWIND_HEADING.search(raw):
             section = "unwind"
         matches = list(PATH_LINE_RE.finditer(raw))
         symbols = re.findall(r"\b([A-Za-z_][\w.]*)\+0x[0-9a-fA-F]+", raw)

@@ -330,6 +330,13 @@ def check_files_current(
 def _unchanged_files_result(
     database: Database, fingerprint: str, source_kind: str
 ) -> dict[str, Any] | None:
+    with database._read_transaction():
+        return _read_unchanged_files_result(database, fingerprint, source_kind)
+
+
+def _read_unchanged_files_result(
+    database: Database, fingerprint: str, source_kind: str
+) -> dict[str, Any] | None:
     state_key = f"file_import:{source_kind}"
     prior = database.connection.execute(
         "SELECT value FROM app_state WHERE key = ?", (state_key,)

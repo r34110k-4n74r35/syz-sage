@@ -15,6 +15,29 @@ from syz_sage.parsing.patch import extract_fix_locations
 
 
 class LocationParsingTests(unittest.TestCase):
+    def test_other_task_and_unwind_frames_cannot_supply_a_missing_crash_coordinate(self) -> None:
+        for heading, section in (
+            ("Backtrace of CPU 1:", "other-task"),
+            ("[ 12.000] stack backtrace of task 123:", "other-task"),
+            ("unwind stack type:0 next_sp: (null)", "unwind"),
+        ):
+            with self.subTest(heading=heading):
+                report = (
+                    "BUG: KASAN: use-after-free in access\n"
+                    "Call Trace:\n access+0x1/0x2\n"
+                    f"{heading}\n access+0x5/0x9 drivers/example.c:42\n"
+                )
+                site = locate_crash_site("KASAN: use-after-free in access", report)
+                self.assertEqual(site.function, "access")
+                self.assertIsNone(site.line)
+                self.assertEqual(site.path, "")
+                self.assertNotIn("drivers/example.c", split_manifestation_report(report)[0])
+                frames = extract_stack_frames(report)
+                self.assertEqual([frame.section for frame in frames], ["manifestation", section])
+                self.assertEqual(frames[1].file_path, "drivers/example.c")
+                self.assertEqual(frames[1].line_number, 42)
+                self.assertEqual(frames[1].report_line, 5)
+
     def test_kmsan_store_origins_cannot_supply_a_missing_crash_coordinate(self) -> None:
         report = """BUG: KMSAN: uninit-value in access
  access+0x1/0x2

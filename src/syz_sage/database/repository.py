@@ -26,6 +26,7 @@ from . import (
     schema_v3,
     schema_v4,
     schema_v5,
+    schema_v6,
     snapshot,
     writes,
 )
@@ -176,6 +177,11 @@ class Database:
             if self._read_only:
                 raise RuntimeError("database schema needs migration; run 'ss migrate' first")
             schema_v5.migrate(connection, on_progress=migration_progress)
+            version = 5
+        if version == 5:
+            if self._read_only:
+                raise RuntimeError("database schema needs migration; run 'ss migrate' first")
+            schema_v6.migrate(connection, on_progress=migration_progress)
         if not bool(connection.execute("PRAGMA foreign_keys").fetchone()[0]):
             raise RuntimeError("SQLite foreign-key enforcement could not be enabled")
         if creating:

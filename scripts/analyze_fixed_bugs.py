@@ -918,8 +918,22 @@ def choose_crash_record(bug: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def parse_timestamp(value: object) -> datetime | None:
+    """Read retained syzbot slash timestamps and ISO timestamps without guessing zones."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    candidate = value.strip()
+    if re.match(r"^\d{4}/\d{2}/\d{2}(?:[ T]|$)", candidate):
+        candidate = candidate[:10].replace("/", "-") + candidate[10:]
+    try:
+        return datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def date_only(value: str | None) -> str:
-    return (value or "")[:10]
+    timestamp = parse_timestamp(value)
+    return timestamp.date().isoformat() if timestamp is not None else ""
 
 
 def make_summary(rows: list[dict[str, Any]], hunk_rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1169,12 +1183,15 @@ def main() -> None:
             "qc_flags": "; ".join(qc),
         }
         # Compute elapsed days without forcing invalid/partial dates into Excel.
-        try:
-            first = datetime.fromisoformat(bug["first-crash"].replace("Z", "+00:00"))
-            fixed = datetime.fromisoformat(bug["fix-time"].replace("Z", "+00:00"))
+        first = parse_timestamp(bug.get("first-crash"))
+        fixed = parse_timestamp(bug.get("fix-time"))
+        # Mixed naive/aware timestamps require timezone information we do not have.
+        if (
+            first is not None
+            and fixed is not None
+            and (first.tzinfo is None) == (fixed.tzinfo is None)
+        ):
             row["days_first_to_fix"] = round((fixed - first).total_seconds() / 86400, 1)
-        except (KeyError, ValueError, TypeError):
-            pass
         rows.append(row)
 
         for idx, hunk in enumerate(code_hunks, 1):

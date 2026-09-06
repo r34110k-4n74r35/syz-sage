@@ -162,6 +162,18 @@ class ChooseBugPayloadTests(unittest.TestCase):
 
 
 class UrlPolicyTests(unittest.TestCase):
+    def test_explicit_zero_port_is_distinct_from_the_default_origin(self) -> None:
+        for scheme in ("http", "https"):
+            default = f"{scheme}://mirror.example.invalid"
+            zero_port = f"{scheme}://mirror.example.invalid:0"
+            for link_origin, dashboard in ((zero_port, default), (default, zero_port)):
+                with self.subTest(link_origin=link_origin), self.assertRaises(PayloadError):
+                    absolute_syzbot_url(f"{link_origin}/bug?extid=alpha123", dashboard)
+            self.assertEqual(
+                absolute_syzbot_url(f"{zero_port}/bug?extid=alpha123", zero_port),
+                f"{zero_port}/bug?extid=alpha123",
+            )
+
     def test_resolves_relative_links_under_a_custom_dashboard_path_and_port(self) -> None:
         self.assertEqual(
             absolute_syzbot_url(
