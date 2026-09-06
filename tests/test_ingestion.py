@@ -135,6 +135,115 @@ class FileIngestionTests(unittest.TestCase):
         self.assertEqual(inventory.read_json(path), {"value": 2})
         self.assertEqual(inventory.read_json(path, payload=original), {"value": 1})
 
+    def test_edit_during_fingerprint_does_not_cache_a_mixed_input_digest(self) -> None:
+        inventory = FileInventory(max_bytes=0)
+        path = self.layout["bugs"] / "extid-alpha123.json"
+        original = inventory.read_bytes
+
+        def read_then_change(source: Path) -> bytes:
+            payload = original(source)
+            if source == path:
+                path.write_bytes(payload.replace(b"fixed on", b"changed!"))
+            return payload
+
+        with mock.patch.object(inventory, "read_bytes", side_effect=read_then_change):
+            fingerprint, errors = inventory.fingerprint(self.layout)
+        self.assertTrue(any("changed while fingerprinting" in error for error in errors))
+        with self.assertRaisesRegex(OSError, "changed after fingerprinting"):
+            inventory.assert_fingerprint_current(self.layout, fingerprint)
+        self.assertEqual(
+            inventory.fingerprint(self.layout), FileInventory().fingerprint(self.layout)
+        )
+
+    def test_edit_after_fingerprint_cannot_activate_or_save_a_false_noop_marker(self) -> None:
+        path = self.layout["bugs"] / "extid-alpha123.json"
+        original = path.read_bytes()
+        inventory = FileInventory()
+        fingerprint = inventory.fingerprint
+
+        def change_after_fingerprint(layout: dict) -> tuple[str, list[str]]:
+            result = fingerprint(layout)
+            path.write_bytes(original.replace(b"fixed on", b"changed!"))
+            return result
+
+        with Database(self.database_path) as database:
+            with mock.patch.object(inventory, "fingerprint", side_effect=change_after_fingerprint):
+                result = database.ingest_files(self.data, inventory=inventory)
+            self.assertEqual(result["status"], "failed", result)
+            self.assertIsNone(database.get_bug("extid-alpha123"))
+            self.assertIsNone(
+                database.connection.execute(
+                    "SELECT value FROM app_state WHERE key='file_import:snapshot'"
+                ).fetchone()
+            )
+            path.write_bytes(original)
+            retry = database.ingest_files(self.data)
+            self.assertEqual(retry["status"], "completed", retry)
+            self.assertEqual(database.get_bug("extid-alpha123")["raw"], json.loads(original))
+
+    def test_edit_after_parsing_rolls_back_snapshot_and_preserves_prior_fingerprint(self) -> None:
+        path = self.layout["bugs"] / "extid-alpha123.json"
+        original = path.read_bytes()
+        with Database(self.database_path) as database:
+            first = database.ingest_files(self.data)
+            state = tuple(
+                database.connection.execute(
+                    "SELECT * FROM app_state WHERE key='file_import:snapshot'"
+                ).fetchone()
+            )
+            self.change_catalog()
+            insert = database._insert_bug_children
+
+            def change_after_parsing(*args: object) -> int:
+                result = insert(*args)
+                path.write_bytes(original.replace(b"fixed on", b"changed!"))
+                return result
+
+            with mock.patch.object(
+                database, "_insert_bug_children", side_effect=change_after_parsing
+            ):
+                result = database.ingest_files(self.data)
+            self.assertEqual(result["status"], "failed", result)
+            self.assertTrue(
+                any("changed after fingerprinting" in error for error in result["failures"])
+            )
+            self.assertEqual(
+                database.get_bug("extid-alpha123")["snapshot_id"], first["snapshot_id"]
+            )
+            self.assertEqual(
+                tuple(
+                    database.connection.execute(
+                        "SELECT * FROM app_state WHERE key='file_import:snapshot'"
+                    ).fetchone()
+                ),
+                state,
+            )
+            self.assertTrue(database.health_check()["ok"])
+            self.assertEqual(database.ingest_files(self.data)["status"], "completed")
+            self.assertIn("changed!", database.get_bug("extid-alpha123")["status"])
+
+    def test_late_artifact_addition_invalidates_read_only_noop_without_database_writes(
+        self,
+    ) -> None:
+        with Database(self.database_path) as database:
+            database.ingest_files(self.data)
+        before = self.database_path.read_bytes(), self.database_path.stat().st_mtime_ns
+        with Database(self.database_path, read_only=True) as reader:
+            unchanged = reader._unchanged_files_result
+
+            def add_after_comparison(*args: object) -> dict | None:
+                result = unchanged(*args)
+                (self.layout["reports"] / "extid-new.txt").write_text("BUG: newly retained report")
+                return result
+
+            with mock.patch.object(
+                reader, "_unchanged_files_result", side_effect=add_after_comparison
+            ):
+                self.assertIsNone(reader.check_files_current(self.data))
+        self.assertEqual(
+            (self.database_path.read_bytes(), self.database_path.stat().st_mtime_ns), before
+        )
+
     def test_streamed_and_cached_ingestion_have_identical_query_results(self) -> None:
         results = []
         for budget in (0, 128, 32 * 1024 * 1024):

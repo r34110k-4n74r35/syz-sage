@@ -187,17 +187,18 @@ def consistency_errors(connection: sqlite3.Connection) -> list[str]:
             LEFT JOIN snapshot_reports sr ON sr.snapshot_id = c.snapshot_id AND sr.bug_id = c.bug_id
             WHERE r.current_blob_sha256 IS NOT NULL AND sr.report_version_id IS NULL
         """,
-        "active report has no current location extraction": """
+        "active report has no current location extraction": f"""
             SELECT COUNT(*) FROM snapshot_reports sr JOIN snapshots s ON s.id = sr.snapshot_id
             WHERE s.is_current = 1 AND NOT EXISTS (
                 SELECT 1 FROM crash_locations l WHERE l.report_version_id = sr.report_version_id
-                AND l.crash_id = sr.crash_id AND l.parser_version = 2)
+                AND l.crash_id = sr.crash_id
+                AND l.parser_version = {location_store.REPORT_PARSER_VERSION})
         """,
-        "active patch has no current location extraction": """
+        "active patch has no current location extraction": f"""
             SELECT COUNT(*) FROM snapshot_patches sp JOIN snapshots s ON s.id = sp.snapshot_id
             WHERE s.is_current = 1 AND NOT EXISTS (
                 SELECT 1 FROM fix_locations l WHERE l.patch_version_id = sp.patch_version_id
-                AND l.parser_version = 2)
+                AND l.parser_version = {location_store.PATCH_PARSER_VERSION})
         """,
     }
     for name, query in checks.items():

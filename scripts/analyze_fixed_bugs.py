@@ -12,6 +12,7 @@ MAINTAINERS proxy because historical kernel trees are not part of this corpus.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import re
 from collections import Counter, defaultdict
@@ -30,6 +31,7 @@ from syz_sage.locations import (
     parse_frames,
     split_manifestation_report,
 )
+from syz_sage.parsing import effective_fixes
 
 from .common import ROOT, writable_path, write_text
 
@@ -92,7 +94,41 @@ def read_text(path: Path) -> str:
 
 
 def normalize_fix_title(value: str | None) -> str:
-    return " ".join((value or "").split())
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", "", value or "")).split())
+
+
+def resolved_fixes(
+    key: str,
+    listing: dict[str, Any],
+    detail: dict[str, Any] | None,
+    resolutions: dict[tuple[str, str, str], dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Merge fix references and count each resolved commit's patch once."""
+    commits: dict[str, dict[str, Any]] = {}
+    sources: set[str] = set()
+    # Prefer the richer detail fields while retaining every listing-only fix.
+    for fix in effective_fixes({}, detail) + effective_fixes(listing, None):
+        if fix.get("hash"):
+            sources.add("Syzbot metadata")
+        else:
+            identity = (key, normalize_fix_title(fix.get("title")), fix.get("repo") or "")
+            supplemental = resolutions.get(identity)
+            if supplemental:
+                fix["hash"] = supplemental["hash"]
+                fix["link"] = supplemental.get("commit_url", "")
+                sources.add("exact-title cgit resolution")
+        if not fix.get("hash"):
+            continue
+        commit_hash = fix["hash"].lower()
+        fix["hash"] = commit_hash
+        if commit_hash not in commits:
+            commits[commit_hash] = fix
+        else:
+            # Listing references commonly omit the richer detail's commit URL.
+            for field, value in fix.items():
+                if value not in (None, "") and commits[commit_hash].get(field) in (None, ""):
+                    commits[commit_hash][field] = value
+    return list(commits.values()), sources
 
 
 def function_candidates(text: str) -> list[str]:
@@ -931,7 +967,9 @@ def main() -> None:
     report_dir = root / "data/artifacts/reports"
     patch_dir = root / "data/artifacts/patches"
     catalog_path = root / "data/processed/catalog.json"
-    catalog_payload = json.loads(read_text(catalog_path)) if catalog_path.exists() else {"bugs": []}
+    if not catalog_path.is_file():
+        parser.error("current catalog is required; run ss update or scripts.build_catalog first")
+    catalog_payload = json.loads(read_text(catalog_path))
     baseline_path = root / "data/processed/refresh_baseline.json"
     completeness_baseline = json.loads(read_text(baseline_path)) if baseline_path.exists() else {}
     resolved_fix_path = root / "data/processed/resolved_fix_hashes.json"
@@ -941,7 +979,11 @@ def main() -> None:
         else {"resolutions": []}
     )
     resolved_fix_map = {
-        (item.get("bug_key", ""), normalize_fix_title(item.get("title"))): item
+        (
+            item.get("bug_key", ""),
+            normalize_fix_title(item.get("title")),
+            item.get("repo") or "",
+        ): item
         for item in resolved_fix_payload.get("resolutions", [])
         if item.get("status") == "resolved" and item.get("hash")
     }
@@ -953,25 +995,13 @@ def main() -> None:
 
     for bug_path in sorted(bug_dir.glob("*.json")):
         key = bug_path.stem
+        if key not in catalog:
+            continue
         local_keys.add(key)
         bug = json.loads(read_text(bug_path))
         report_path = report_dir / f"{key}.txt"
         report_ok = report_path.exists() and report_path.stat().st_size > 0
-        fixes: list[dict[str, Any]] = []
-        fix_hash_sources: set[str] = set()
-        for original_fix in bug.get("fix-commits") or []:
-            fix = dict(original_fix)
-            if fix.get("hash"):
-                fix_hash_sources.add("Syzbot metadata")
-            else:
-                supplemental = resolved_fix_map.get((key, normalize_fix_title(fix.get("title"))))
-                if supplemental:
-                    fix["hash"] = supplemental["hash"]
-                    fix["link"] = supplemental.get("commit_url", "")
-                    fix["repo"] = supplemental.get("repo") or fix.get("repo")
-                    fix_hash_sources.add("exact-title cgit resolution")
-            if fix.get("hash"):
-                fixes.append(fix)
+        fixes, fix_hash_sources = resolved_fixes(key, catalog[key], bug, resolved_fix_map)
         available_fixes = [x for x in fixes if (patch_dir / f"{x['hash']}.diff").exists()]
         included = report_ok and bool(available_fixes)
         manifest.append(
@@ -1173,17 +1203,7 @@ def main() -> None:
         entry = catalog[key]
         report_path = report_dir / f"{key}.txt"
         report_ok = report_path.exists() and report_path.stat().st_size > 0
-        fixes = []
-        for original_fix in entry.get("fix_commits") or []:
-            fix = dict(original_fix)
-            if not fix.get("hash"):
-                supplemental = resolved_fix_map.get((key, normalize_fix_title(fix.get("title"))))
-                if supplemental:
-                    fix["hash"] = supplemental["hash"]
-                    fix["link"] = supplemental.get("commit_url", "")
-                    fix["repo"] = supplemental.get("repo") or fix.get("repo")
-            if fix.get("hash"):
-                fixes.append(fix)
+        fixes, _ = resolved_fixes(key, entry, None, resolved_fix_map)
         available_fixes = [x for x in fixes if (patch_dir / f"{x['hash']}.diff").exists()]
         manifest.append(
             {
@@ -1212,7 +1232,7 @@ def main() -> None:
 
     summary = make_summary(rows, hunk_rows)
     completeness = {
-        "live_fixed_listing": len(catalog) or len(manifest),
+        "live_fixed_listing": len(catalog),
         "local_bug_json": len(local_keys),
         "nonempty_crash_reports": sum(bool(m["report"]) for m in manifest),
         "bugs_with_hashed_fix": sum(m["fix_commits_with_hash"] > 0 for m in manifest),
@@ -1230,7 +1250,7 @@ def main() -> None:
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "methodology_version": "1.1-report-patch-cohort",
-        "cohort_definition": "Fixed Syzbot bugs with a non-empty local crash-report artifact and >=1 downloaded patch for a hashed fix commit. Short reports are retained; reproducer files and fields are ignored.",
+        "cohort_definition": "Current catalog fixed Syzbot bugs with a non-empty local crash-report artifact and >=1 downloaded patch for a hashed fix commit. Short reports are retained; reproducer files and fields are ignored.",
         "distance_note": "D4/D5 are path-taxonomy proxies for MAINTAINERS membership; validate against the historical tree before publication claims.",
         "catalog_source": catalog_payload.get("source", ""),
         "catalog_generated_at": catalog_payload.get("generated_at", ""),

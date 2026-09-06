@@ -77,7 +77,11 @@ python -m scripts.build_fixed_bug_report outputs/analysis.json outputs/report.md
 ```
 
 The analyzer selects bugs with a retained nonempty report and a downloaded
-patch for a known fix hash. Its JSON includes bug results, patch hunks, a cohort
+patch for a known fix hash from the current catalog. A catalog is required;
+retained bugs absent from it are excluded from both statistics and the cohort
+manifest. Fix references combine listing and detail metadata, match supplemental
+resolutions by bug, subject, and repository, and count each patch hash once.
+Its JSON includes bug results, patch hunks, a cohort
 manifest, and coverage/exclusion information. The Markdown builder consumes
 that analysis rather than rerunning retrieval.
 
@@ -146,7 +150,8 @@ python -m scripts.fetch_artifacts --syzbot --configs --repros --limit 5
 The title resolver searches declared repositories for an unambiguous exact
 commit subject and downloads the matched patch. Original bug JSON remains
 unchanged; supplemental results retain unsuccessful and ambiguous searches
-as well as resolved commits. Repository identity remains part of a resolution,
+as well as resolved commits. A failed refresh preserves a previously successful
+resolution instead of removing its known hash. Repository identity remains part of a resolution,
 so equal titles in different repositories stay separate. The cgit title-search
 workflow supports `git.kernel.org` repositories; an unsupported search source
 is retained as unresolved instead of being searched as though it were cgit.

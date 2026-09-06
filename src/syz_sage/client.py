@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 from collections.abc import Callable
+from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
@@ -48,8 +49,10 @@ class WindowRateLimiter:
         with self._lock:
             self._cooldown_until = max(self._cooldown_until, time.monotonic() + seconds)
 
-    def acquire(self) -> None:
+    def acquire(self, cancel_event: threading.Event | None = None) -> None:
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError("download cancelled")
             with self._lock:
                 now = time.monotonic()
                 while self._times and now - self._times[0] >= self.window:
@@ -63,7 +66,10 @@ class WindowRateLimiter:
                 if len(self._times) >= self.requests:
                     waits.append(self.window - (now - self._times[0]) + 0.05)
                 wait = max(waits)
-            time.sleep(wait)
+            if cancel_event is None:
+                time.sleep(wait)
+            elif cancel_event.wait(wait):
+                raise CancelledError("download cancelled")
 
 
 def _trusted_patch_url(url: str) -> SplitResult:
@@ -120,7 +126,7 @@ class SyzbotClient:
         retry: RetryPolicy | None = None,
         opener: urllib.request.OpenerDirector | None = None,
         limiter: WindowRateLimiter | None = None,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         normalized_dashboard = dashboard.rstrip("/")
         validate_http_url(normalized_dashboard)
@@ -131,7 +137,31 @@ class SyzbotClient:
         self.retry = retry or RetryPolicy()
         self.opener = opener or urllib.request.build_opener()
         self.limiter = limiter or WindowRateLimiter()
-        self.sleep = sleep
+        self.sleep = sleep or time.sleep
+        self._interruptible_sleep = sleep is None or sleep is time.sleep
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        """Stop waiting workers and prevent requests after any current socket operation."""
+        self._cancelled.set()
+
+    def reset_cancellation(self) -> None:
+        """Start a new batch after all workers from an interrupted batch have exited."""
+        self._cancelled.clear()
+
+    def _check_cancelled(self) -> None:
+        if self._cancelled.is_set():
+            raise CancelledError("download cancelled")
+
+    def _wait(self, delay: float) -> None:
+        self._check_cancelled()
+        if self._interruptible_sleep:
+            if self._cancelled.wait(delay):
+                raise CancelledError("download cancelled")
+        else:
+            # Keep injected sleep hooks usable in deterministic client tests.
+            self.sleep(delay)
+        self._check_cancelled()
 
     def get(
         self, url: str, *, dashboard_request: bool = False, timeout: float | None = None
@@ -140,11 +170,14 @@ class SyzbotClient:
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         last_error: BaseException | None = None
         for attempt in range(self.retry.attempts):
+            self._check_cancelled()
             if dashboard_request:
-                self.limiter.acquire()
+                self.limiter.acquire(cancel_event=self._cancelled)
+            self._check_cancelled()
             try:
                 with self.opener.open(request, timeout=timeout or self.retry.timeout) as response:
                     payload: object = response.read()
+                    self._check_cancelled()
                     if not isinstance(payload, bytes):
                         raise FetchError(f"GET {url} returned a non-bytes response")
                     return payload
@@ -160,7 +193,7 @@ class SyzbotClient:
                     elif attempt + 1 < self.retry.attempts:
                         # Patch requests do not acquire the dashboard limiter,
                         # so penalizing it alone would not delay this retry.
-                        self.sleep(delay)
+                        self._wait(delay)
                 elif exc.code not in {403, 500, 502, 503, 504}:
                     break
             except (
@@ -171,7 +204,7 @@ class SyzbotClient:
             ) as exc:
                 last_error = exc
             if attempt + 1 < self.retry.attempts:
-                self.sleep(self.retry.base_delay * (1.5**attempt) + random.random() / 4)
+                self._wait(self.retry.base_delay * (1.5**attempt) + random.random() / 4)
         raise FetchError(f"GET {url} failed: {last_error}") from last_error
 
     def listing_json(self, namespace: str = "upstream", status: str = "fixed") -> bytes:

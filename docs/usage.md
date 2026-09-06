@@ -267,6 +267,14 @@ persists completed work in that existing retry file. An abrupt termination can
 re-download the last small batch of saved completions; it does not require
 restarting the whole download phase. No separate recovery files are needed.
 
+An unreadable or malformed retry-state file stops the update before retrieval
+and is left unchanged. Restore a valid copy of that state before retrying;
+deleting it or replacing its queues with empty lists can lose pending refreshes.
+On Ctrl-C, workers stop scheduling retries and wake from rate-limit/backoff
+waits. A request already reading from a socket may still need to finish or time
+out before the command exits. Processed download completions are saved before
+waiting for those workers.
+
 Partial candidates preserve the last complete active snapshot and its
 associated report/patch versions. Failed refreshes remain pending even when an
 older valid file exists. On a first-ever partial run, there is no active
@@ -342,6 +350,11 @@ names. `ss migrate --json` returns the resulting database status.
 
 Schema version 4 stores bug types for every retained snapshot using its saved
 titles. It does not change original JSON, reports, or patches.
+
+Schema version 5 repairs KMSAN origin and page-allocation/free stack sections,
+including historical report associations. It corrects crash coordinates that
+were inferred from those auxiliary traces. The repair uses SQLite's saved
+report bytes; no download, new snapshot, or patch reindexing is needed.
 
 Read-only `show`, `list`, `filter`, `status`, and `check` report when migration is
 required. Run `ss migrate` before retrying them. Writable opens during update

@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.parse
 from collections.abc import Callable
+from concurrent.futures import CancelledError
 from pathlib import Path
 
 from syz_sage.artifacts import DownloadJob, bounded_results, fetch_artifact
@@ -174,6 +175,8 @@ def fetch_bug_json(rec: dict, force: bool = False) -> dict | None:
         write_bytes(dest, result.payload)
         _set_pending("details", key, False)
         return result.detail
+    except CancelledError:
+        raise
     except Exception as exc:
         log(f"  json fail {key}: {exc}")
         return None
@@ -201,6 +204,8 @@ def fetch_text(url: str | None, dest: Path) -> bool:
         if is_report:
             _set_pending("reports", dest.stem, False)
         return True
+    except CancelledError:
+        raise
     except Exception as exc:
         log(f"  text fail {dest.name}: {exc}")
         return False
@@ -226,6 +231,8 @@ def _fetch_patch(commit_hash: str, repo: str | None, dest: Path) -> bool:
         write_bytes(dest, result.payload)
         _set_pending("patches", commit_hash, False)
         return True
+    except CancelledError:
+        raise
     except Exception as exc:
         log(f"  patch fail {commit_hash[:12]}: {exc}")
         return False
@@ -302,11 +309,14 @@ def cmd_patches(bugs: list[dict], limit: int | None) -> None:
         print("patches already complete")
         return
     for done, (_, future) in enumerate(
-        bounded_results(jobs, lambda job: fetch_patch(*job), workers=8), start=1
+        bounded_results(jobs, lambda job: fetch_patch(*job), workers=8, cancel=CLIENT.cancel),
+        start=1,
     ):
         try:
             if future.result():
                 ok += 1
+        except CancelledError:
+            raise
         except Exception as exc:
             log(f"  patch worker error: {exc}")
         if done % 50 == 0 or done == len(jobs):
@@ -423,9 +433,13 @@ def cmd_syzbot(
             force_json=rec["key"] in refresh_keys or not report_ok(rec["key"]),
         )
 
-    for done, (rec, future) in enumerate(bounded_results(todo, _one, workers=workers), start=1):
+    for done, (rec, future) in enumerate(
+        bounded_results(todo, _one, workers=workers, cancel=CLIENT.cancel), start=1
+    ):
         try:
             res = future.result()
+        except CancelledError:
+            raise
         except Exception as exc:
             log(f"  worker error {rec['key']}: {exc}")
             res = {"json": False, "report": False, "patches": 0, "error": str(exc)}
@@ -477,6 +491,7 @@ def main() -> None:
     if not (args.patches or args.syzbot or args.all):
         parser.error("specify --patches, --syzbot, --all, or --status")
     with _exclusive_update_lock(PROCESSED.parent):
+        CLIENT.reset_cancellation()
         ensure_dirs()
         bugs = load_catalog()
         if args.patches or args.all:

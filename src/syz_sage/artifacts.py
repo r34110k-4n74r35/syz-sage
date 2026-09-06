@@ -108,7 +108,11 @@ Result = TypeVar("Result")
 
 
 def bounded_results(
-    jobs: Iterable[Job], fetch: Callable[[Job], Result], *, workers: int
+    jobs: Iterable[Job],
+    fetch: Callable[[Job], Result],
+    *,
+    workers: int,
+    cancel: Callable[[], None] | None = None,
 ) -> Generator[tuple[Job, Future[Result]], None, None]:
     """Yield completions with at most twice the worker count scheduled.
 
@@ -139,6 +143,15 @@ def bounded_results(
                 # Release completed payloads before scheduling another batch.
                 done.clear()
                 fill()
+        except BaseException:
+            # Generator close/interrupt must signal running requests before the
+            # executor waits for them. Cancelling futures alone stops only work
+            # that has not started yet.
+            for future in pending:
+                future.cancel()
+            if cancel is not None:
+                cancel()
+            raise
         finally:
             for future in pending:
                 future.cancel()

@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import unittest
 from collections.abc import Callable
 from concurrent.futures import Future
@@ -15,7 +16,7 @@ from unittest import mock
 from syz_sage.artifacts import DownloadJob, validate_artifact
 from syz_sage.client import FetchError
 from syz_sage.config import DataPaths
-from syz_sage.database import Database
+from syz_sage.database import SCHEMA_VERSION, Database
 from syz_sage.ingestion import FileInventory
 from syz_sage.parsing import PayloadError
 from syz_sage.retry_state import SyncState, load_sync_state
@@ -774,13 +775,90 @@ class UpdaterTests(unittest.TestCase):
         self.paths.sync_state.write_text("invalid JSON")
         client = FakeClient()
 
-        summary = Updater(self.paths, self.database_path, client=client).run()
+        with self.assertRaisesRegex(PayloadError, "Cannot read sync state"):
+            Updater(self.paths, self.database_path, client=client).run()
 
-        self.assertFalse(summary.ok)
-        self.assertEqual(summary.failures[0]["kind"], "sync-state")
+        self.assertEqual(self.paths.sync_state.read_text(), "invalid JSON")
         self.assertEqual(client.bug_calls, [])
         self.assertEqual(client.report_calls, [])
         self.assertEqual(client.patch_calls, [])
+
+    def test_corrupted_refresh_state_cannot_activate_stale_report_on_repeated_runs(self) -> None:
+        Updater(self.paths, self.database_path, client=FakeClient()).run()
+        with Database(self.database_path, read_only=True) as database:
+            original_snapshot = database.status()["current_snapshot"]["id"]
+            original_report = database.get_bug("extid-alpha123")["report"]
+        failed = Updater(
+            self.paths, self.database_path, client=ChangedReportClient(fail_report=True)
+        ).run(UpdateOptions(refresh_details=True))
+        self.assertEqual(failed.database["status"], "partial")
+        self.paths.sync_state.write_text("invalid JSON")
+        original_database = self.database_path.read_bytes()
+        for _ in range(2):
+            client = ChangedReportClient()
+            with self.assertRaisesRegex(PayloadError, "saved retry state was preserved"):
+                Updater(self.paths, self.database_path, client=client).run()
+            self.assertEqual(self.paths.sync_state.read_text(), "invalid JSON")
+            self.assertEqual(client.report_calls, [])
+            self.assertEqual(self.database_path.read_bytes(), original_database)
+            with Database(self.database_path, read_only=True) as database:
+                self.assertEqual(database.status()["current_snapshot"]["id"], original_snapshot)
+                self.assertEqual(database.get_bug("extid-alpha123")["report"], original_report)
+
+    def test_interrupt_flushes_saved_results_before_waiting_for_running_worker(self) -> None:
+        self.paths.ensure()
+        jobs = [
+            DownloadJob("report", f"id-job{number}", self.paths.reports / f"id-job{number}.txt")
+            for number in range(2)
+        ]
+        state = SyncState()
+        waiting = threading.Event()
+        stopped = threading.Event()
+        worker_observed: list[set[str]] = []
+        client = FakeClient()
+        client.cancel = stopped.set
+        updater = Updater(self.paths, self.database_path, client=client)
+
+        def fetch(client, job):
+            if job.key == "id-job0":
+                if not waiting.wait(timeout=2):
+                    raise RuntimeError("test worker did not start")
+                return validate_artifact(job, b"BUG: saved report\n")
+            waiting.set()
+            if not stopped.wait(timeout=2):
+                raise RuntimeError("test worker was not cancelled")
+            # Cancellation is signalled just before the callback writes the
+            # queue; wait for that atomic write without touching real data.
+            for _ in range(200):
+                persisted, error = load_sync_state(self.paths.sync_state)
+                if error is None and persisted.pending_reports == {"id-job1"}:
+                    worker_observed.append(persisted.pending_reports)
+                    break
+                threading.Event().wait(0.005)
+            return validate_artifact(job, b"BUG: unsaved interrupted report\n")
+
+        def accept(result):
+            state.pending_reports.discard(result.job.key)
+            raise KeyboardInterrupt
+
+        with (
+            mock.patch("syz_sage.sync.fetch_artifact", side_effect=fetch),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            updater._download(
+                jobs,
+                UpdateOptions(workers=2),
+                UpdateSummary("upstream", "fixed"),
+                state,
+                FileInventory(),
+                {},
+                label="Reports",
+                pending=state.pending_reports,
+                accept=accept,
+            )
+        self.assertEqual(worker_observed, [{"id-job1"}])
+        self.assertTrue(jobs[0].path.is_file())
+        self.assertFalse(jobs[1].path.exists())
 
     def test_no_longer_listed_bug_leaves_retained_files_in_place(self) -> None:
         Updater(
@@ -981,6 +1059,7 @@ class UpdaterTests(unittest.TestCase):
                         {
                             "bug_key": "id-beta456",
                             "title": "fs: guard beta state",
+                            "repo": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
                             "hash": ["not", "a", "hash"],
                         }
                     ]
@@ -1028,6 +1107,138 @@ class UpdaterTests(unittest.TestCase):
 
         self.assertTrue(summary.ok, summary.failures)
         self.assertEqual(client.patch_calls, [])
+
+    def test_obsolete_resolution_of_current_bug_does_not_require_its_patch(self) -> None:
+        Updater(self.paths, self.database_path, client=FakeClient()).run()
+        self.paths.resolutions.write_text(
+            json.dumps(
+                {
+                    "resolutions": [
+                        {
+                            "bug_key": "id-beta456",
+                            "title": "obsolete fix no longer referenced",
+                            "repo": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+                            "status": "resolved",
+                            "hash": GAMMA_HASH,
+                        }
+                    ]
+                }
+            )
+        )
+        client = FakeClient()
+        completed = Updater(self.paths, self.database_path, client=client).run()
+        self.assertTrue(completed.ok, completed.failures)
+        self.assertEqual(completed.database["status"], "completed")
+        self.assertEqual(client.patch_calls, [])
+        self.assertFalse((self.paths.patches / f"{GAMMA_HASH}.diff").exists())
+
+    def test_accepted_resolution_repairs_patch_after_file_loses_its_hash(self) -> None:
+        Updater(self.paths, self.database_path, client=FakeClient()).run()
+        resolution = {
+            "bug_key": "id-beta456",
+            "title": "fs: guard beta state",
+            "repo": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+            "status": "resolved",
+            "hash": BETA_HASH,
+        }
+        self.paths.resolutions.write_text(json.dumps({"resolutions": [resolution]}))
+        first = Updater(self.paths, self.database_path, client=ResolutionPatchClient()).run()
+        self.assertTrue(first.ok, first.failures)
+        (self.paths.patches / f"{BETA_HASH}.diff").unlink()
+        resolution.pop("hash")
+        resolution["status"] = "unresolved"
+        self.paths.resolutions.write_text(json.dumps({"resolutions": [resolution]}))
+
+        client = ResolutionPatchClient()
+        repaired = Updater(self.paths, self.database_path, client=client).run()
+        self.assertTrue(repaired.ok, repaired.failures)
+        self.assertEqual(client.patch_calls, [BETA_HASH])
+        with Database(self.database_path, read_only=True) as database:
+            self.assertEqual(database.get_bug("id-beta456")["fixes"][0]["hash"], BETA_HASH)
+
+    def test_schema4_update_reads_accepted_resolution_before_automatic_migration(self) -> None:
+        Updater(self.paths, self.database_path, client=FakeClient()).run()
+        resolution = {
+            "bug_key": "id-beta456",
+            "title": "fs: guard beta state",
+            "repo": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+            "status": "resolved",
+            "hash": BETA_HASH,
+        }
+        self.paths.resolutions.write_text(json.dumps({"resolutions": [resolution]}))
+        first = Updater(self.paths, self.database_path, client=ResolutionPatchClient()).run()
+        self.assertTrue(first.ok, first.failures)
+        with Database(self.database_path) as database:
+            old_snapshot = database.status()["current_snapshot"]["id"]
+            source_hashes = {
+                row[0] for row in database.connection.execute("SELECT sha256 FROM blobs")
+            }
+            # Schema 5 changes report parsing; reconstruct the schema 4 marker
+            # and parser versions while retaining its accepted fix resolution.
+            database.connection.execute("UPDATE crash_locations SET parser_version=2")
+            database.connection.execute("UPDATE crash_stack_frames SET parser_version=2")
+            database.connection.execute("PRAGMA user_version=4")
+        (self.paths.patches / f"{BETA_HASH}.diff").unlink()
+        resolution.pop("hash")
+        resolution["status"] = "unresolved"
+        self.paths.resolutions.write_text(json.dumps({"resolutions": [resolution]}))
+        original_accepted = Database.accepted_resolutions
+        read_only_versions: list[int] = []
+
+        def accepted(database, targets):
+            if database._read_only:
+                read_only_versions.append(
+                    database.connection.execute("PRAGMA user_version").fetchone()[0]
+                )
+                with mock.patch.object(
+                    database, "initialize", side_effect=AssertionError("read-only migration")
+                ):
+                    return original_accepted(database, targets)
+            return original_accepted(database, targets)
+
+        client = ResolutionPatchClient()
+        with mock.patch.object(Database, "accepted_resolutions", new=accepted):
+            completed = Updater(self.paths, self.database_path, client=client).run()
+        self.assertTrue(completed.ok, completed.failures)
+        self.assertEqual(read_only_versions, [4])
+        self.assertEqual(client.patch_calls, [BETA_HASH])
+        self.assertEqual(client.bug_calls, [])
+        self.assertEqual(client.report_calls, [])
+        with Database(self.database_path, read_only=True) as database:
+            self.assertEqual(database.status()["schema_version"], SCHEMA_VERSION)
+            self.assertEqual(database.get_bug("id-beta456")["fixes"][0]["hash"], BETA_HASH)
+            self.assertTrue(database.get_bug("id-beta456")["fixes"][0]["patch_available"])
+            self.assertTrue(database.health_check()["ok"])
+            self.assertIsNotNone(
+                database.connection.execute(
+                    "SELECT id FROM snapshots WHERE id=?", (old_snapshot,)
+                ).fetchone()
+            )
+            self.assertTrue(
+                source_hashes
+                <= {row[0] for row in database.connection.execute("SELECT sha256 FROM blobs")}
+            )
+
+    def test_matching_file_resolution_overrides_accepted_hash_for_downloads(self) -> None:
+        Updater(self.paths, self.database_path, client=FakeClient()).run()
+        resolution = {
+            "bug_key": "id-beta456",
+            "title": "fs: guard beta state",
+            "repo": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+            "status": "resolved",
+            "hash": BETA_HASH,
+        }
+        self.paths.resolutions.write_text(json.dumps({"resolutions": [resolution]}))
+        first = Updater(self.paths, self.database_path, client=ResolutionPatchClient()).run()
+        self.assertTrue(first.ok, first.failures)
+        (self.paths.patches / f"{BETA_HASH}.diff").unlink()
+        resolution["hash"] = GAMMA_HASH
+        self.paths.resolutions.write_text(json.dumps({"resolutions": [resolution]}))
+
+        client = ResolutionPatchClient()
+        completed = Updater(self.paths, self.database_path, client=client).run()
+        self.assertTrue(completed.ok, completed.failures)
+        self.assertEqual(client.patch_calls, [GAMMA_HASH])
 
     def test_changed_listing_reuses_saved_details_and_report(self) -> None:
         Updater(self.paths, self.database_path, client=FakeClient()).run(UpdateOptions(workers=2))
@@ -1368,12 +1579,13 @@ class UpdaterTests(unittest.TestCase):
             )
         )
         client = FakeClient()
+        before = self.paths.sync_state.read_bytes()
 
-        summary = Updater(self.paths, self.database_path, client=client).run()
+        with self.assertRaisesRegex(PayloadError, "invalid hash"):
+            Updater(self.paths, self.database_path, client=client).run()
 
-        self.assertFalse(summary.ok)
         self.assertEqual(client.patch_calls, [])
-        self.assertEqual(summary.failures[0]["kind"], "sync-state")
+        self.assertEqual(self.paths.sync_state.read_bytes(), before)
 
     def test_untrusted_report_metadata_is_a_partial_resource_failure(self) -> None:
         Updater(self.paths, self.database_path, client=FakeClient()).run(UpdateOptions(workers=2))

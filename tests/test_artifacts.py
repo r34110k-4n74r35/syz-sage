@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -93,6 +94,47 @@ class ArtifactTests(unittest.TestCase):
                 errors.append(job)
         self.assertEqual(sorted(successes), [0, 1, 3, 4])
         self.assertEqual(errors, [2])
+
+    def test_generator_close_signals_running_workers_before_joining_them(self) -> None:
+        running = threading.Event()
+        cancelled = threading.Event()
+
+        def fetch(value: int) -> int:
+            if value == 0:
+                if not running.wait(timeout=2):
+                    raise RuntimeError("test worker never started")
+                return value
+            running.set()
+            if not cancelled.wait(timeout=2):
+                raise RuntimeError("running worker did not receive cancellation")
+            return value
+
+        results = bounded_results([0, 1], fetch, workers=2, cancel=cancelled.set)
+        with contextlib.closing(results):
+            job, future = next(results)
+            self.assertEqual((job, future.result()), (0, 0))
+        self.assertTrue(cancelled.is_set())
+
+    def test_completed_iteration_does_not_cancel_client_for_the_next_phase(self) -> None:
+        cancel = mock.Mock()
+        results = list(bounded_results([1, 2], lambda value: value, workers=1, cancel=cancel))
+        self.assertEqual(sorted(future.result() for _, future in results), [1, 2])
+        cancel.assert_not_called()
+
+    def test_interrupt_while_waiting_cancels_workers_before_executor_shutdown(self) -> None:
+        cancelled = threading.Event()
+
+        def fetch(value: int) -> int:
+            if not cancelled.wait(timeout=2):
+                raise RuntimeError("worker was not cancelled during interrupted wait")
+            return value
+
+        with (
+            mock.patch("syz_sage.artifacts.wait", side_effect=KeyboardInterrupt),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            list(bounded_results([1, 2], fetch, workers=2, cancel=cancelled.set))
+        self.assertTrue(cancelled.is_set())
 
 
 if __name__ == "__main__":

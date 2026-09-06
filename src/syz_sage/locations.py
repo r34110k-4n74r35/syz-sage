@@ -152,48 +152,40 @@ def parse_frames(text: str) -> list[Frame]:
     return frames
 
 
+_AUXILIARY_HEADINGS = (
+    ("allocation", re.compile(r"Allocated by task|Page(?: last)? allocated via order", re.I)),
+    ("free", re.compile(r"Freed by task|Page last free stack trace", re.I)),
+    ("origin", re.compile(r"Uninit was (?:created|stored)\b|Origin:|Local variable", re.I)),
+)
+_MEMORY_HEADING = re.compile(
+    r"The buggy address (?:belongs|is located)|Memory state around|page_owner tracks the page",
+    re.I,
+)
+
+
+def _auxiliary_section(line: str) -> str | None:
+    for section, pattern in _AUXILIARY_HEADINGS:
+        if pattern.search(line):
+            return section
+    return None
+
+
 def split_manifestation_report(report: str) -> tuple[str, str, str]:
-    markers = [
-        "Allocated by task",
-        "Freed by task",
-        "The buggy address belongs",
-        "The buggy address is located",
-        "Memory state around",
-        "Uninit was created",
-        "Local variable",
-        "Origin:",
-        "Page allocated via order",
-    ]
-    cut = len(report)
-    for marker in markers:
-        pos = report.find(marker)
-        if pos >= 0:
-            cut = min(cut, pos)
-    main = report[:cut]
-    freed = ""
-    fm = re.search(r"Freed by task[^\n]*\n", report)
-    if fm:
-        end = len(report)
-        for marker in (
-            "The buggy address",
-            "Memory state around",
-            "Allocated by task",
-            "Page allocated",
-        ):
-            pos = report.find(marker, fm.end())
-            if pos >= 0:
-                end = min(end, pos)
-        freed = report[fm.end() : end]
-    allocated = ""
-    am = re.search(r"Allocated by task[^\n]*\n", report)
-    if am:
-        end = len(report)
-        for marker in ("Freed by task", "The buggy address", "Memory state around"):
-            pos = report.find(marker, am.end())
-            if pos >= 0:
-                end = min(end, pos)
-        allocated = report[am.end() : end]
-    return main, freed, allocated
+    """Keep origin and allocation history out of the failing access's frames."""
+    boundaries: list[tuple[int, int, str | None]] = []
+    offset = 0
+    for line in report.splitlines(keepends=True):
+        section = _auxiliary_section(line)
+        if section or _MEMORY_HEADING.search(line):
+            boundaries.append((offset, offset + len(line), section))
+        offset += len(line)
+    main = report[: boundaries[0][0]] if boundaries else report
+    sections: dict[str, str] = {}
+    for index, (_, start, section) in enumerate(boundaries):
+        if section is not None and section in {"free", "allocation"} and section not in sections:
+            end = boundaries[index + 1][0] if index + 1 < len(boundaries) else len(report)
+            sections[section] = report[start:end]
+    return main, sections.get("free", ""), sections.get("allocation", "")
 
 
 def title_functions(title: str) -> list[str]:
@@ -498,12 +490,9 @@ def extract_stack_frames(report: str) -> list[StackFrame]:
     frames: list[StackFrame] = []
     section = "manifestation"
     for number, raw in enumerate(report.splitlines(), 1):
-        if re.search(r"Allocated by task|Page allocated via order", raw, re.I):
-            section = "allocation"
-        elif re.search(r"Freed by task|Page last free stack trace", raw, re.I):
-            section = "free"
-        elif re.search(r"Uninit was created|Origin:|Local variable", raw):
-            section = "origin"
+        auxiliary = _auxiliary_section(raw)
+        if auxiliary:
+            section = auxiliary
         elif _KCSAN_ACCESS_RE.match(raw):
             section = "conflicting-access"
         elif re.search(r"(?:stack backtrace|backtrace) of (?:CPU|task)", raw, re.I):

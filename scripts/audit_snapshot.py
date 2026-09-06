@@ -876,8 +876,8 @@ def audit(root: Path) -> dict[str, Any]:
     add_issue(actionable, "corrupt_reports", corrupt_reports)
     add_issue(actionable, "orphan_reports", orphan_reports)
 
-    identities: dict[tuple[str, str], dict[str, Any]] = {}
-    base_identities: set[tuple[str, str]] = set()
+    identities: dict[tuple[str, str, str], dict[str, Any]] = {}
+    base_identities: set[tuple[str, str, str]] = set()
     expected_hashes: set[str] = set()
     effective_hashes_by_bug: dict[str, set[str]] = {}
     hash_sources: dict[str, set[str]] = {}
@@ -919,7 +919,7 @@ def audit(root: Path) -> dict[str, Any]:
         bug_key: str,
         location: str,
         base: bool,
-    ) -> tuple[str, str] | None:
+    ) -> tuple[str, str, str] | None:
         if not isinstance(fix, dict):
             malformed_fix_records.append(
                 {
@@ -949,10 +949,22 @@ def audit(root: Path) -> dict[str, Any]:
                 location=f"{location}.hash",
             )
             return None
-        identity = (bug_key, title)
+        raw_repo = fix.get("repo")
+        if raw_repo is not None and not isinstance(raw_repo, str):
+            malformed_fix_records.append(
+                {
+                    "bug_key": bug_key,
+                    "source": source,
+                    "location": f"{location}.repo",
+                    "error": "must be a string",
+                }
+            )
+            return None
+        repo = raw_repo or ""
+        identity = (bug_key, title, repo)
         entry = identities.setdefault(
             identity,
-            {"bug_key": bug_key, "title": title, "sources": set(), "hashes": set()},
+            {"bug_key": bug_key, "title": title, "repo": repo, "sources": set(), "hashes": set()},
         )
         entry["sources"].add(source)
         commit_hash = add_hash(
@@ -971,7 +983,7 @@ def audit(root: Path) -> dict[str, Any]:
 
     for key, record, index in catalog["records"]:
         fixes = record.get("fix_commits")
-        primary_owner_identity: tuple[str, str] | None = None
+        primary_owner_identity: tuple[str, str, str] | None = None
         if isinstance(fixes, list):
             for fix_index, fix in enumerate(fixes):
                 identity = ingest_fix(
@@ -1031,7 +1043,7 @@ def audit(root: Path) -> dict[str, Any]:
     resolution_shape_errors: list[dict[str, Any]] = []
     duplicate_resolution_identities: list[dict[str, Any]] = []
     orphan_resolutions: list[dict[str, Any]] = []
-    resolution_identities: set[tuple[str, str]] = set()
+    resolution_identities: set[tuple[str, str, str]] = set()
     if resolution_path.exists():
         resolution_payload, resolution_error = load_json(resolution_path)
         if resolution_error:
@@ -1050,7 +1062,7 @@ def audit(root: Path) -> dict[str, Any]:
                     {"location": "$.resolutions", "error": "must be a list"}
                 )
             else:
-                resolution_counter: Counter[tuple[str, str]] = Counter()
+                resolution_counter: Counter[tuple[str, str, str]] = Counter()
                 for index, resolution in enumerate(resolutions):
                     location = f"$.resolutions[{index}]"
                     if not isinstance(resolution, dict):
@@ -1060,6 +1072,7 @@ def audit(root: Path) -> dict[str, Any]:
                         continue
                     bug_key = resolution.get("bug_key")
                     raw_title = resolution.get("title")
+                    raw_repo = resolution.get("repo")
                     status = resolution.get("status")
                     entry_valid = True
                     if not is_safe_key(bug_key):
@@ -1073,6 +1086,11 @@ def audit(root: Path) -> dict[str, Any]:
                                 "location": f"{location}.title",
                                 "error": "must normalize to a non-empty string",
                             }
+                        )
+                        entry_valid = False
+                    if raw_repo is not None and not isinstance(raw_repo, str):
+                        resolution_shape_errors.append(
+                            {"location": f"{location}.repo", "error": "must be a string"}
                         )
                         entry_valid = False
                     if not isinstance(status, str) or status not in {"resolved", "unresolved"}:
@@ -1098,20 +1116,28 @@ def audit(root: Path) -> dict[str, Any]:
                         continue
                     assert isinstance(bug_key, str) and isinstance(raw_title, str)
                     title = normalize_title(raw_title)
-                    identity = (bug_key, title)
+                    repo = raw_repo or ""
+                    identity = (bug_key, title, repo)
                     resolution_counter[identity] += 1
                     resolution_identities.add(identity)
                     if identity not in base_identities:
-                        orphan_resolutions.append({"bug_key": bug_key, "title": title})
+                        orphan_resolutions.append(
+                            {"bug_key": bug_key, "title": title, "repo": repo}
+                        )
                     ingest_fix(
-                        {"title": title, "hash": resolution.get("hash")},
+                        {"title": title, "repo": repo, "hash": resolution.get("hash")},
                         source="resolved_fix_hashes",
                         bug_key=bug_key,
                         location=location,
                         base=False,
                     )
                 duplicate_resolution_identities = [
-                    {"bug_key": identity[0], "title": identity[1], "count": count}
+                    {
+                        "bug_key": identity[0],
+                        "title": identity[1],
+                        "repo": identity[2],
+                        "count": count,
+                    }
                     for identity, count in sorted(resolution_counter.items())
                     if count > 1
                 ]
@@ -1132,6 +1158,7 @@ def audit(root: Path) -> dict[str, Any]:
         {
             "bug_key": identity[0],
             "title": identity[1],
+            "repo": identity[2],
             "sources": sorted(identities[identity]["sources"]),
             "resolution_record_present": identity in resolution_identities,
         }
@@ -1139,13 +1166,14 @@ def audit(root: Path) -> dict[str, Any]:
         if not identities[identity]["hashes"]
     ]
     unattempted_title_only = [
-        {"bug_key": identity[0], "title": identity[1]}
+        {"bug_key": identity[0], "title": identity[1], "repo": identity[2]}
         for identity in sorted(title_only_before_resolutions - resolution_identities)
     ]
     identities_with_multiple_hashes = [
         {
             "bug_key": identity[0],
             "title": identity[1],
+            "repo": identity[2],
             "hashes": sorted(entry["hashes"]),
         }
         for identity, entry in sorted(identities.items())
@@ -1182,10 +1210,10 @@ def audit(root: Path) -> dict[str, Any]:
     add_issue(actionable, "corrupt_patches", corrupt_patches)
 
     valid_patch_set = set(valid_patches)
-    identities_by_bug: dict[str, list[tuple[str, str]]] = {key: [] for key in catalog_keys}
+    identities_by_bug: dict[str, list[tuple[str, str, str]]] = {key: [] for key in catalog_keys}
     fix_identities_with_valid_patches: list[dict[str, Any]] = []
     for identity in sorted(base_identities):
-        bug_key, title = identity
+        bug_key, title, repo = identity
         identities_by_bug.setdefault(bug_key, []).append(identity)
         valid_identity_hashes = sorted(identities[identity]["hashes"] & valid_patch_set)
         if valid_identity_hashes:
@@ -1193,6 +1221,7 @@ def audit(root: Path) -> dict[str, Any]:
                 {
                     "bug_key": bug_key,
                     "title": title,
+                    "repo": repo,
                     "valid_patch_hashes": valid_identity_hashes,
                 }
             )
@@ -1226,7 +1255,7 @@ def audit(root: Path) -> dict[str, Any]:
         "definitions": {
             "effective_hash": "a syntactically valid 40-hex hash attributed to the bug by the metadata union",
             "valid_patch": "an effective hash whose local patch passes the patch validator",
-            "unresolved_fix_identity": "a normalized (bug_key, title) identity with no effective hash",
+            "unresolved_fix_identity": "a normalized (bug_key, title, repository) identity with no effective hash",
             "partial_fix_identity_coverage": "at least one identity has a valid patch and at least one identity is unresolved",
             "all_fix_identities_covered": "the bug has at least one fix identity and every identity has at least one valid patch",
         },
@@ -1395,7 +1424,7 @@ def audit(root: Path) -> dict[str, Any]:
             "orphans": orphan_reports,
         },
         "fixes": {
-            "identity_rule": "(bug_key, normalized_title)",
+            "identity_rule": "(bug_key, normalized_title, repository)",
             "identity_count": len(base_identities),
             "unique_hash_count": len(expected_hashes),
             "unresolved_title_only": unresolved_title_only,

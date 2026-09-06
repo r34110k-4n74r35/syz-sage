@@ -16,6 +16,7 @@ from typing import Any
 
 UNPARSED = object()
 FileStamp = tuple[int, int, int, int, int]
+InputIdentity = tuple[str, tuple[tuple[str, FileStamp], ...]]
 
 
 def file_stamp(path: Path) -> FileStamp:
@@ -62,7 +63,7 @@ class FileInventory:
         self._files: dict[Path, _ObservedFile] = {}
         self._payloads: OrderedDict[Path, bytes] = OrderedDict()
         self._cached_bytes = 0
-        self._fingerprint: tuple[object, str, list[str]] | None = None
+        self._fingerprint: tuple[InputIdentity, str, list[str]] | None = None
 
     @property
     def cached_bytes(self) -> int:
@@ -200,8 +201,7 @@ class FileInventory:
         except OSError as exc:
             return {}, [f"cannot list {directory}: {exc}"]
 
-    def fingerprint(self, layout: Mapping[str, Path]) -> tuple[str, list[str]]:
-        """Keep the legacy exact-content fingerprint; reuse it only for stable inputs."""
+    def _inputs(self, layout: Mapping[str, Path]) -> tuple[list[Path], InputIdentity, list[str]]:
         candidates = [
             layout[name]
             for name in ("listing_json", "listing_html", "catalog", "resolutions")
@@ -220,6 +220,19 @@ class FileInventory:
             except OSError as exc:
                 errors.append(f"cannot fingerprint {path}: {exc}")
         identity = (str(layout["root"].absolute()), tuple(stamps))
+        return candidates, identity, errors
+
+    def assert_fingerprint_current(self, layout: Mapping[str, Path], fingerprint: str) -> None:
+        """Reject edits since fingerprinting, including files reloaded into the cache."""
+        known = self._fingerprint
+        _, identity, errors = self._inputs(layout)
+        if errors or known is None or known[1] != fingerprint or known[0] != identity:
+            self.invalidate()
+            raise OSError("retained input files changed after fingerprinting; retry ingestion")
+
+    def fingerprint(self, layout: Mapping[str, Path]) -> tuple[str, list[str]]:
+        """Keep the legacy exact-content fingerprint; reuse it only for stable inputs."""
+        candidates, identity, errors = self._inputs(layout)
         if not errors and self._fingerprint is not None and self._fingerprint[0] == identity:
             return self._fingerprint[1], list(self._fingerprint[2])
         digest = hashlib.sha256()
@@ -235,7 +248,10 @@ class FileInventory:
             except OSError as exc:
                 errors.append(f"cannot fingerprint {path}: {exc}")
             digest.update(b"\x00")
+        _, final_identity, final_errors = self._inputs(layout)
+        errors.extend(final_errors)
+        if identity != final_identity:
+            errors.append("retained input files changed while fingerprinting; retry ingestion")
         value = digest.hexdigest()
-        if not errors:
-            self._fingerprint = (identity, value, [])
+        self._fingerprint = None if errors else (identity, value, [])
         return value, errors

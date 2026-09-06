@@ -21,7 +21,7 @@ import json
 import os
 import re
 import sqlite3
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
-from . import location_store, schema_v3, schema_v4
+from . import location_store, schema_v3, schema_v4, schema_v5
 from .bug_types import BUG_TYPES, classify_bug_type
 from .ingestion import UNPARSED, ArtifactInspection, FileInventory
 from .parsing import (
@@ -38,10 +38,16 @@ from .parsing import (
     validate_http_url,
     validate_listing_membership,
 )
+from .resolutions import (
+    ResolutionTargets,
+    resolution_identity,
+    resolution_matches,
+    resolution_targets,
+)
 from .retry_state import load_sync_state
 from .storage import writable_path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DEFAULT_SOURCE_URL = "https://syzkaller.appspot.com/upstream/fixed?json=1"
 _MAX_BUG_KEY_LENGTH = 128
 _HASH_RE = re.compile(r"^[0-9a-fA-F]{7,128}$")
@@ -875,7 +881,12 @@ class Database:
             if self._read_only:
                 raise RuntimeError("database schema needs migration; run 'ss migrate' first")
             schema_v4.migrate(connection)
+            version = 4
         schema_v4.validate(connection)
+        if version == 4:
+            if self._read_only:
+                raise RuntimeError("database schema needs migration; run 'ss migrate' first")
+            schema_v5.migrate(connection)
         if not bool(connection.execute("PRAGMA foreign_keys").fetchone()[0]):
             raise RuntimeError("SQLite foreign-key enforcement could not be enabled")
         return self
@@ -1244,7 +1255,7 @@ class Database:
                        JOIN crashes cr ON cr.id=l.crash_id
                        JOIN bug_versions bv ON bv.id=cr.bug_version_id
                        JOIN bugs b ON b.id=bv.bug_id WHERE l.parser_version=?""",
-                    (location_store.PARSER_VERSION,),
+                    (location_store.REPORT_PARSER_VERSION,),
                 )
             }
         else:
@@ -1254,7 +1265,7 @@ class Database:
                     """SELECT DISTINCT pv.commit_hash, pv.blob_sha256 FROM fix_locations l
                        JOIN patch_versions pv ON pv.id=l.patch_version_id
                        WHERE l.parser_version=?""",
-                    (location_store.PARSER_VERSION,),
+                    (location_store.PATCH_PARSER_VERSION,),
                 )
             }
         for key, path in paths.items():
@@ -1372,6 +1383,7 @@ class Database:
         source_urls: Mapping[Path, str] | None = None,
         parsed_listing: Any = UNPARSED,
         parsed_payloads: Mapping[str, Any] | None = None,
+        verify_files: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         self.initialize()
         inventory = inventory or FileInventory()
@@ -1508,6 +1520,13 @@ class Database:
             expected_hashes.update(self._fix_hashes(record, bug))
             expected_hashes.update(self._fix_hashes(listing_by_key[record["key"]], bug))
 
+        targets = resolution_targets(
+            listing_candidates,
+            {key: value[1] for key, value in prepared_payloads.items() if value[1] is not None},
+        )
+        resolution_choices = {
+            resolution_identity(value): value for value in self.accepted_resolutions(targets)
+        }
         prepared_resolutions: list[dict[str, Any]] = []
         for index, value in enumerate(resolutions):
             try:
@@ -1523,6 +1542,10 @@ class Database:
                 # Resolution files are retained across rolling-listing changes.
                 # A safe key absent from this candidate is historical, not malformed.
                 continue
+            if not resolution_matches(resolution, targets):
+                # An obsolete subject/repository is retained in the source
+                # document but is not a dependency of this candidate snapshot.
+                continue
             prepared_resolution = dict(resolution)
             resolved_hash = _text(resolution.get("hash")).lower()
             if resolved_hash and not _HASH_RE.fullmatch(resolved_hash):
@@ -1534,14 +1557,21 @@ class Database:
                 errors.append(f"resolution[{index}] {key}: repository is not a string")
                 prepared_resolution["repo"] = ""
             if resolved_hash:
-                expected_hashes.setdefault(resolved_hash, _text(resolution.get("commit_url")))
+                prepared_resolution["hash"] = resolved_hash
+                resolution_choices[resolution_identity(resolution)] = prepared_resolution
             prepared_resolutions.append(prepared_resolution)
+        for resolution in resolution_choices.values():
+            expected_hashes.setdefault(
+                _text(resolution["hash"]).lower(), _text(resolution.get("commit_url"))
+            )
 
         report_paths, report_read_errors = self._read_artifact_files(reports_dir, ".txt")
         patch_paths, patch_read_errors = self._read_artifact_files(patches_dir, ".diff")
         errors.extend(report_read_errors)
         errors.extend(patch_read_errors)
         try:
+            if verify_files is not None:
+                verify_files()
             report_files, report_read_errors = self._inspect_artifacts(
                 report_paths,
                 kind="report",
@@ -2113,6 +2143,8 @@ class Database:
                     if commit_hash not in expected_hashes:
                         summary["patches"]["orphan_files"] += 1
 
+                if verify_files is not None:
+                    verify_files()
                 current_snapshot = connection.execute(
                     "SELECT run_id FROM snapshots WHERE is_current = 1"
                 ).fetchone()
@@ -2606,9 +2638,46 @@ class Database:
             "patches": cls._path_member(paths, ("patches", "patches_dir")) or artifacts / "patches",
         }
 
-    @classmethod
+    def accepted_resolutions(self, targets: ResolutionTargets) -> list[dict[str, Any]]:
+        """Read accepted hashes applicable to current title-only fix references.
+
+        This uses the stable v1 tables so an updater can inspect an older
+        database read-only before its eventual indexing/migration phase.
+        """
+        if not targets:
+            return []
+        self._validate_v1_schema(self.connection)
+        resolutions: list[dict[str, Any]] = []
+        for row in self.connection.execute(
+            """SELECT b.key, r.normalized_title, r.repo, r.resolved_hash, r.details_json
+               FROM fix_resolutions r JOIN bugs b ON b.id=r.bug_id
+               JOIN sync_runs sr ON sr.id=r.last_seen_run_id
+               WHERE r.resolved_hash IS NOT NULL AND sr.status='completed'
+               ORDER BY r.id"""
+        ):
+            if (row["normalized_title"], row["repo"]) not in targets.get(row["key"], set()):
+                continue
+            try:
+                details = json.loads(row["details_json"])
+            except (TypeError, ValueError):
+                details = {}
+            resolutions.append(
+                {
+                    "bug_key": row["key"],
+                    # Escape the already normalized title so a subsequent
+                    # resolution_identity call preserves literal angle brackets.
+                    "title": html.escape(row["normalized_title"], quote=False),
+                    "repo": row["repo"],
+                    "hash": row["resolved_hash"],
+                    "commit_url": _text(details.get("commit_url"))
+                    if isinstance(details, dict)
+                    else "",
+                }
+            )
+        return resolutions
+
     def _pending_file_retries(
-        cls,
+        self,
         layout: Mapping[str, Path],
         inventory: FileInventory | None = None,
     ) -> tuple[set[str], list[str]]:
@@ -2622,13 +2691,13 @@ class Database:
         errors = [f"sync state: {state_error}"] if state_error else []
         try:
             listing = inventory.read_json(layout["listing_json"])
-            raw_records, _ = cls._listing_records(listing)
+            raw_records, _ = self._listing_records(listing)
         except (OSError, ValueError) as exc:
             return set(), [*errors, f"cannot match pending retries to listing: {exc}"]
         records = [
             record
             for value in raw_records
-            if (record := cls._catalog_record_from_listing(value)) is not None
+            if (record := self._catalog_record_from_listing(value)) is not None
         ]
         live_keys = {record["key"] for record in records}
         if state_error:
@@ -2645,6 +2714,7 @@ class Database:
             )
         if state.pending_patches:
             expected_hashes: set[str] = set()
+            details: dict[str, Mapping[str, Any]] = {}
             for record in records:
                 if not isinstance(record.get("fix_commits"), list):
                     record["fix_commits"] = []
@@ -2653,10 +2723,11 @@ class Database:
                     payload = inventory.read_json(layout["bugs"] / f"{record['key']}.json")
                     if isinstance(payload, dict):
                         detail = payload
+                        details[record["key"]] = payload
                 except (OSError, ValueError):
                     # Normal ingestion reports missing/malformed payloads.
                     pass
-                expected_hashes.update(cls._fix_hashes(record, detail))
+                expected_hashes.update(self._fix_hashes(record, detail))
             try:
                 catalog = inventory.read_json(layout["catalog"])
                 catalog_records = catalog.get("bugs", [])
@@ -2667,23 +2738,27 @@ class Database:
                             and _text(record.get("key")) in live_keys
                             and isinstance(record.get("fix_commits"), list)
                         ):
-                            expected_hashes.update(cls._fix_hashes(record, None))
+                            expected_hashes.update(self._fix_hashes(record, None))
             except (OSError, ValueError, AttributeError):
                 pass
+            targets = resolution_targets(records, details)
+            choices = {
+                resolution_identity(value): value for value in self.accepted_resolutions(targets)
+            }
             try:
                 resolution_payload = inventory.read_json(layout["resolutions"])
                 resolutions = resolution_payload.get("resolutions", [])
                 if isinstance(resolutions, list):
                     for resolution in resolutions:
-                        if (
-                            isinstance(resolution, Mapping)
-                            and _text(_field(resolution, "bug_key", "key")) in live_keys
+                        if isinstance(resolution, Mapping) and resolution_matches(
+                            resolution, targets
                         ):
                             commit_hash = _text(resolution.get("hash")).lower()
                             if _HASH_RE.fullmatch(commit_hash):
-                                expected_hashes.add(commit_hash)
+                                choices[resolution_identity(resolution)] = dict(resolution)
             except (OSError, ValueError, AttributeError):
                 pass
+            expected_hashes.update(_text(value["hash"]).lower() for value in choices.values())
             pending_patches = state.pending_patches & expected_hashes
             if pending_patches:
                 errors.append(f"sync state: {len(pending_patches)} live patch refresh(es) pending")
@@ -2737,7 +2812,13 @@ class Database:
         fingerprint, errors = inventory.fingerprint(layout)
         if errors:
             return None
-        return self._unchanged_files_result(fingerprint, source_kind)
+        result = self._unchanged_files_result(fingerprint, source_kind)
+        if result is not None:
+            try:
+                inventory.assert_fingerprint_current(layout, fingerprint)
+            except OSError:
+                return None
+        return result
 
     def _unchanged_files_result(self, fingerprint: str, source_kind: str) -> dict[str, Any] | None:
         state_key = f"file_import:{source_kind}"
@@ -2810,11 +2891,20 @@ class Database:
         inherited_errors.extend(pending_errors)
         fingerprint, fingerprint_errors = inventory.fingerprint(layout)
         inherited_errors.extend(fingerprint_errors)
+
+        def verify_files() -> None:
+            inventory.assert_fingerprint_current(layout, fingerprint)
+
         state_key = f"file_import:{source_kind}"
         if not inherited_errors:
             unchanged = self._unchanged_files_result(fingerprint, source_kind)
             if unchanged is not None:
-                return unchanged
+                try:
+                    verify_files()
+                except OSError as exc:
+                    inherited_errors.append(str(exc))
+                else:
+                    return unchanged
         extra_documents: list[tuple[str, str, str, bytes, bool, str | None]] = []
 
         try:
@@ -2943,6 +3033,7 @@ class Database:
             source_urls=source_urls,
             parsed_listing=parsed_listing,
             parsed_payloads=parsed_payloads,
+            verify_files=verify_files,
         )
         result["fingerprint"] = fingerprint
         result_status = _text(result.get("status"))
@@ -3463,6 +3554,10 @@ class Database:
     def get_bug(self, key: str) -> dict[str, Any] | None:
         """Return normalized details (and parsed raw JSON) for one bug."""
         self.initialize()
+        with self._read_transaction():
+            return self._get_bug(key)
+
+    def _get_bug(self, key: str) -> dict[str, Any] | None:
         bug_row = self.connection.execute(
             """
             SELECT b.id, b.key, b.syzbot_id, c.title, c.bug_type, c.bug_url, c.json_url,

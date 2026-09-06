@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import http.client
 import io
+import threading
 import unittest
 import urllib.error
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from unittest import mock
 
-from syz_sage.client import FetchError, RetryPolicy, SyzbotClient
+from syz_sage.client import FetchError, RetryPolicy, SyzbotClient, WindowRateLimiter
 
 
 class PatchUrlTests(unittest.TestCase):
@@ -215,6 +217,106 @@ class ClientRetryTests(unittest.TestCase):
         self.assertTrue(body.closed)
         self.opener.open.assert_called_once()
         self.sleep.assert_not_called()
+
+
+class ClientCancellationTests(unittest.TestCase):
+    def test_cancellation_wakes_retry_backoff_and_prevents_another_request(self) -> None:
+        for status in (429, 503):
+            with self.subTest(status=status):
+                opener = mock.Mock()
+                opener.open.side_effect = urllib.error.HTTPError(
+                    "https://github.com/test", status, "retry", {}, io.BytesIO()
+                )
+                client = SyzbotClient(
+                    opener=opener,
+                    retry=RetryPolicy(attempts=3, base_delay=60, rate_limit_delay=60),
+                )
+                waiting = threading.Event()
+                original_wait = client._wait
+
+                def wait(delay: float, waiting=waiting, original_wait=original_wait) -> None:
+                    waiting.set()
+                    original_wait(delay)
+
+                with (
+                    mock.patch.object(client, "_wait", side_effect=wait),
+                    ThreadPoolExecutor(max_workers=1) as executor,
+                ):
+                    future = executor.submit(client.get, "https://github.com/test")
+                    try:
+                        self.assertTrue(waiting.wait(timeout=2))
+                    finally:
+                        client.cancel()
+                    with self.assertRaises(CancelledError):
+                        future.result(timeout=2)
+                opener.open.assert_called_once()
+
+    def test_cancellation_wakes_dashboard_rate_limit_and_cooldown(self) -> None:
+        for cooldown in (False, True):
+            with self.subTest(cooldown=cooldown):
+                limiter = WindowRateLimiter(requests=1, window=60)
+                if cooldown:
+                    limiter.penalize(60)
+                else:
+                    limiter.acquire()
+                opener = mock.Mock()
+                client = SyzbotClient(opener=opener, limiter=limiter)
+                waiting = threading.Event()
+                original_acquire = limiter.acquire
+
+                def acquire(
+                    cancel_event: threading.Event | None = None,
+                    waiting=waiting,
+                    original_acquire=original_acquire,
+                ) -> None:
+                    waiting.set()
+                    original_acquire(cancel_event)
+
+                with (
+                    mock.patch.object(limiter, "acquire", side_effect=acquire),
+                    ThreadPoolExecutor(max_workers=1) as executor,
+                ):
+                    future = executor.submit(
+                        client.get, "https://syzkaller.appspot.com/test", dashboard_request=True
+                    )
+                    try:
+                        self.assertTrue(waiting.wait(timeout=2))
+                    finally:
+                        client.cancel()
+                    with self.assertRaises(CancelledError):
+                        future.result(timeout=2)
+                opener.open.assert_not_called()
+
+    def test_cancelled_client_can_be_explicitly_reset_for_a_new_batch(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b"complete"
+        opener = mock.Mock()
+        opener.open.return_value = response
+        client = SyzbotClient(opener=opener)
+        client.cancel()
+        with self.assertRaises(CancelledError):
+            client.get("https://github.com/test")
+        opener.open.assert_not_called()
+        client.reset_cancellation()
+        self.assertEqual(client.get("https://github.com/test"), b"complete")
+        opener.open.assert_called_once()
+
+    def test_cancel_during_response_read_does_not_start_patch_fallback(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        opener = mock.Mock()
+        opener.open.return_value = response
+        client = SyzbotClient(opener=opener)
+
+        def read() -> bytes:
+            client.cancel()
+            return b"invalid patch"
+
+        response.read.side_effect = read
+        with self.assertRaises(CancelledError):
+            client.patch("a" * 40)
+        opener.open.assert_called_once()
 
 
 if __name__ == "__main__":

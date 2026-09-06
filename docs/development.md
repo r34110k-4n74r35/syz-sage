@@ -31,6 +31,8 @@ location.
 | Derived-location indexing and the v2 migration | [location_store.py](../src/syz_sage/location_store.py) |
 | Snapshot artifact associations and the v3 migration | [schema_v3.py](../src/syz_sage/schema_v3.py) |
 | Stored bug types and the v4 migration | [schema_v4.py](../src/syz_sage/schema_v4.py) |
+| Crash/origin interpretation repair in v5 | [schema_v5.py](../src/syz_sage/schema_v5.py) |
+| Current fix subject/repository matching | [resolutions.py](../src/syz_sage/resolutions.py) |
 | Data-root defaults and explicit path resolution | [config.py](../src/syz_sage/config.py), [storage.py](../src/syz_sage/storage.py) |
 
 [`pyproject.toml`](../pyproject.toml) discovers the application package under
@@ -118,6 +120,12 @@ memory limit. Changed file stamps invalidate observations. The fingerprint
 keeps the existing exact-content algorithm, so reuse does not change what
 counts as an unchanged mirror.
 
+The input membership and file stamps are checked against that fingerprint
+before indexing and before candidate activation. An external edit during
+ingestion prevents a stale fingerprint from being recorded for different data.
+`show` and `filter` hold a read transaction across related queries so a concurrent
+update cannot mix metadata and locations from different snapshots.
+
 After saving a downloaded file, the coordinator verifies the on-disk bytes
 before recording its parsed representation. An external edit between save and
 inspection therefore cannot be cached as the downloaded payload. Reused local
@@ -166,6 +174,10 @@ Check the database indexing path as well as the pure parser. Existing derived
 rows are versioned by parser revision; changing the parser alone does not
 repair a user's already indexed data. Provide an explicit transactional
 reindexing/migration path when stored interpretation changes.
+
+Report and patch parsers have separate revision constants. Schema v5 uses
+report revision 3 and patch revision 2; a report-only repair does not reindex
+unchanged patch locations.
 
 For an ingestion change, preserve complete-snapshot activation, retries across
 interruption, unchanged-update behavior, and exact raw evidence. For a new

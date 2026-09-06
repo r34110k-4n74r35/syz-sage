@@ -7,7 +7,8 @@ import importlib
 import json
 import os
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,12 @@ from .parsing import (
     parse_subsystem_tags,
     valid_listing_html,
     validate_listing_membership,
+)
+from .resolutions import (
+    ResolutionTargets,
+    resolution_identity,
+    resolution_matches,
+    resolution_targets,
 )
 from .retry_state import SyncState as _SyncState
 from .retry_state import load_sync_state as _load_sync_state
@@ -206,24 +213,34 @@ def _add_patch_job(
 
 def _resolution_patch_jobs(
     path: Path,
-    live_keys: set[str],
+    targets: ResolutionTargets,
     selected_keys: set[str],
     inventory: FileInventory | None = None,
+    accepted: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[list[tuple[str, str | None]], list[dict[str, str]]]:
     """Read current resolved hashes without treating retained history as live."""
+
+    jobs = {
+        resolution_identity(value): (
+            str(value["hash"]).lower(),
+            str(value.get("repo") or "") or None,
+        )
+        for value in accepted
+        if str(value["bug_key"]) in selected_keys
+    }
 
     try:
         document = decode_json_object(
             inventory.read_bytes(path) if inventory is not None else path.read_bytes()
         )
     except FileNotFoundError:
-        return [], []
+        return list(jobs.values()), []
     except (OSError, PayloadError) as exc:
-        return [], [{"kind": "resolution-metadata", "key": "", "error": str(exc)}]
+        return list(jobs.values()), [{"kind": "resolution-metadata", "key": "", "error": str(exc)}]
 
     values = document.get("resolutions")
     if not isinstance(values, list):
-        return [], [
+        return list(jobs.values()), [
             {
                 "kind": "resolution-metadata",
                 "key": "",
@@ -231,7 +248,6 @@ def _resolution_patch_jobs(
             }
         ]
 
-    jobs: list[tuple[str, str | None]] = []
     failures: list[dict[str, str]] = []
     for index, value in enumerate(values):
         if not isinstance(value, Mapping):
@@ -254,7 +270,7 @@ def _resolution_patch_jobs(
                 }
             )
             continue
-        if key not in live_keys:
+        if not resolution_matches(value, targets):
             continue
 
         hash_value = value.get("hash")
@@ -280,8 +296,8 @@ def _resolution_patch_jobs(
             )
             continue
         if key in selected_keys:
-            jobs.append((hash_value.lower(), repo_value or None))
-    return jobs, failures
+            jobs[resolution_identity(value)] = (hash_value.lower(), repo_value or None)
+    return list(jobs.values()), failures
 
 
 def _catalog_fields(records: list[dict[str, Any]], source_url: str) -> dict[str, Any]:
@@ -390,7 +406,13 @@ class Updater:
         summary = UpdateSummary(namespace=options.namespace, status=options.status)
         sync_state, sync_state_error = _load_sync_state(self.paths.sync_state)
         if sync_state_error is not None:
-            summary.failures.append({"kind": "sync-state", "key": "", "error": sync_state_error})
+            raise PayloadError(
+                f"Cannot read sync state {self.paths.sync_state}: {sync_state_error}. "
+                "Restore or repair this file before updating; saved retry state was preserved."
+            )
+        reset = getattr(self.client, "reset_cancellation", None)
+        if callable(reset):
+            reset()
         inventory = FileInventory()
         source_urls: dict[Path, str] = {}
         plan = self._discover_listing(options, summary, sync_state, inventory)
@@ -567,8 +589,20 @@ class Updater:
         advance = self._phase_progress(label, len(jobs))
         completed = 0
         last_saved = time.monotonic()
+
+        def cancel() -> None:
+            stop = getattr(self.client, "cancel", None)
+            if callable(stop):
+                stop()
+            # Persist accepted results before waiting for any in-flight socket
+            # operation to finish during generator/executor shutdown.
+            _write_sync_state(self.paths.sync_state, sync_state)
+
         results = bounded_results(
-            jobs, lambda job: fetch_artifact(self.client, job), workers=options.workers
+            jobs,
+            lambda job: fetch_artifact(self.client, job),
+            workers=options.workers,
+            cancel=cancel,
         )
         try:
             with contextlib.closing(results):
@@ -583,6 +617,8 @@ class Updater:
                         if result.source_url is not None:
                             source_urls[job.path] = result.source_url
                         accept(result)
+                    except CancelledError:
+                        raise
                     except Exception as exc:
                         if failed is not None:
                             failed(job)
@@ -800,8 +836,17 @@ class Updater:
                             "error": f"invalid commit hash {commit_hash!r}",
                         }
                     )
+        targets = resolution_targets(records, details)
+        accepted: list[dict[str, Any]] = []
+        if self.database_path.is_file() and self.database_path.stat().st_size:
+            with contextlib.closing(Database(self.database_path, read_only=True)) as database:
+                accepted = database.accepted_resolutions(targets)
         resolution_jobs, resolution_failures = _resolution_patch_jobs(
-            self.paths.resolutions, live_keys, {str(record["key"]) for record in records}, inventory
+            self.paths.resolutions,
+            targets,
+            {str(record["key"]) for record in records},
+            inventory,
+            accepted,
         )
         summary.failures.extend(resolution_failures)
         for commit_hash, repo in resolution_jobs:

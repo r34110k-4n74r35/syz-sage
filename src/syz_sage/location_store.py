@@ -18,7 +18,8 @@ from .locations import (
 from .parsing import parse_subsystem_tags
 from .patch_locations import FixLocation, extract_fix_locations
 
-PARSER_VERSION = 2
+REPORT_PARSER_VERSION = 3
+PATCH_PARSER_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -264,7 +265,7 @@ def index_report(
     if connection.execute(
         "SELECT 1 FROM crash_locations WHERE report_version_id = ? AND crash_id = ? "
         "AND parser_version = ?",
-        (report_version_id, crash_id, PARSER_VERSION),
+        (report_version_id, crash_id, REPORT_PARSER_VERSION),
     ).fetchone():
         return
     row = connection.execute(
@@ -289,7 +290,7 @@ def index_report(
     )
     connection.execute(
         "DELETE FROM crash_stack_frames WHERE report_version_id = ? AND parser_version <> ?",
-        (report_version_id, PARSER_VERSION),
+        (report_version_id, REPORT_PARSER_VERSION),
     )
     for ordinal, site in enumerate(prepared.sites):
         connection.execute(
@@ -309,7 +310,7 @@ def index_report(
                 site.confidence,
                 site.strategy,
                 site.evidence,
-                PARSER_VERSION,
+                REPORT_PARSER_VERSION,
             ),
         )
     for ordinal, frame in enumerate(prepared.frames):
@@ -329,7 +330,7 @@ def index_report(
                 frame.column_number,
                 int(frame.is_inline),
                 frame.raw_line,
-                PARSER_VERSION,
+                REPORT_PARSER_VERSION,
             ),
         )
 
@@ -342,7 +343,7 @@ def index_patch(
 ) -> None:
     if connection.execute(
         "SELECT 1 FROM fix_locations WHERE patch_version_id = ? AND parser_version = ?",
-        (patch_version_id, PARSER_VERSION),
+        (patch_version_id, PATCH_PARSER_VERSION),
     ).fetchone():
         return
     row = connection.execute(
@@ -364,7 +365,7 @@ def index_patch(
         values.update(
             patch_version_id=patch_version_id,
             ordinal=ordinal,
-            parser_version=PARSER_VERSION,
+            parser_version=PATCH_PARSER_VERSION,
         )
         connection.execute(
             """INSERT INTO fix_locations(

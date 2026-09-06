@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from syz_sage import location_store, schema_v3, schema_v4
-from syz_sage.database import Database
+from syz_sage.database import SCHEMA_VERSION, Database
 from syz_sage.storage import temporary_directory
 
 FIXTURES = Path(__file__).parent / "fixtures/legacy_data"
@@ -76,8 +76,8 @@ class SchemaV3Tests(unittest.TestCase):
                 (location["function_name"], location["file_path"], location["line_number"]),
                 ("inner", "include/linux/test.h", 42),
             )
-            self.assertEqual(location["parser_version"], 2)
-            self.assertEqual(db.status()["schema_version"], 4)
+            self.assertEqual(location["parser_version"], location_store.REPORT_PARSER_VERSION)
+            self.assertEqual(db.status()["schema_version"], SCHEMA_VERSION)
             self.assertEqual(
                 [
                     tuple(r)

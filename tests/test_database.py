@@ -6,8 +6,11 @@ import shutil
 import sqlite3
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from syz_sage import location_store
 from syz_sage.database import Database
+from syz_sage.resolutions import resolution_targets
 from syz_sage.storage import temporary_directory
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy_data"
@@ -159,6 +162,42 @@ class DatabaseTests(unittest.TestCase):
             database.initialize()
             self.assertIsNone(database.get_bug("extid-does-not-exist"))
 
+    def test_get_bug_keeps_one_snapshot_while_an_updater_activates(self) -> None:
+        with Database(self.database_path) as writer:
+            self.import_fixture(writer)
+            with Database(self.database_path, read_only=True) as reader:
+                before = reader.get_bug("extid-alpha123")
+                original = location_store.bug_locations
+
+                def activate_before_locations(connection: sqlite3.Connection, bug_id: int) -> dict:
+                    report = self.legacy / "artifacts" / "reports" / "extid-alpha123.txt"
+                    report.write_text(report.read_text().replace("alpha.c:42", "alpha.c:77"))
+                    listing = self.legacy / "raw" / "upstream_fixed.html"
+                    listing.write_text(
+                        "<html><body><table><tr><td>"
+                        '<a href="/bug?extid=alpha123">alpha</a></td><td>'
+                        '<a href="/upstream/fixed?label=subsystems%3Ausb">usb</a></td></tr>'
+                        '<tr><td><a href="/bug?id=beta456">beta</a></td></tr></table></body></html>'
+                    )
+                    result = writer.import_legacy(self.legacy)
+                    self.assertEqual(result["status"], "completed", result)
+                    return original(connection, bug_id)
+
+                with mock.patch.object(
+                    location_store, "bug_locations", side_effect=activate_before_locations
+                ):
+                    during = reader.get_bug("extid-alpha123")
+                self.assertEqual(during, before)
+                latest = reader.get_bug("extid-alpha123")
+                self.assertNotEqual(latest["snapshot_id"], before["snapshot_id"])
+                self.assertIn("alpha.c:77", latest["report"]["text"])
+                self.assertEqual(latest["crash_locations"][0]["line_number"], 77)
+                self.assertIn("usb", latest["subsystems"])
+                self.assertEqual(reader.connection.total_changes, 0)
+                with reader._transaction("DEFERRED"):
+                    self.assertEqual(reader.get_bug("extid-alpha123"), latest)
+                    self.assertTrue(reader.connection.in_transaction)
+
     def test_database_contains_artifact_bytes_not_only_legacy_paths(self) -> None:
         with Database(self.database_path) as database:
             self.import_fixture(database)
@@ -262,6 +301,95 @@ class DatabaseTests(unittest.TestCase):
                 before,
             )
             self.assertEqual(self.ingest_direct(database)["status"], "completed")
+            self.assertEqual(database.get_bug("id-beta456")["fixes"][0]["hash"], ALPHA_HASH)
+
+    def test_accepted_resolution_still_requires_patch_when_source_hash_is_removed(self) -> None:
+        resolution_path = self.legacy / "processed" / "resolved_fix_hashes.json"
+        original = resolution_path.read_bytes()
+        payload = json.loads(original)
+        payload["resolutions"][0].update(status="resolved", hash=BETA_HASH)
+        resolution_path.write_text(json.dumps(payload))
+        patch_path = self.legacy / "artifacts" / "patches" / f"{BETA_HASH}.diff"
+        patch = (patch_path.parent / f"{ALPHA_HASH}.diff").read_bytes()
+        patch_path.write_bytes(patch)
+        with Database(self.database_path) as database:
+            first = database.import_legacy(self.legacy)
+            self.assertEqual(first["status"], "completed", first)
+            resolution_path.write_bytes(original)
+            patch_path.unlink()
+            partial = database.import_legacy(self.legacy)
+            self.assertEqual(partial["status"], "partial", partial)
+            self.assertTrue(any("patch(es) missing" in item for item in partial["failures"]))
+            beta = database.get_bug("id-beta456")
+            self.assertEqual(beta["snapshot_id"], first["snapshot_id"])
+            self.assertEqual(beta["fixes"][0]["hash"], BETA_HASH)
+            self.assertTrue(beta["fixes"][0]["patch_available"])
+            patch_path.write_bytes(patch)
+            self.assertEqual(database.import_legacy(self.legacy)["status"], "completed")
+
+    def test_obsolete_resolution_and_pending_patch_do_not_block_a_current_fix(self) -> None:
+        resolution_path = self.legacy / "processed" / "resolved_fix_hashes.json"
+        payload = json.loads(resolution_path.read_bytes())
+        payload["resolutions"][0].update(status="resolved", hash=BETA_HASH)
+        resolution_path.write_text(json.dumps(payload))
+        patch_path = self.legacy / "artifacts" / "patches" / f"{BETA_HASH}.diff"
+        patch_path.write_bytes((patch_path.parent / f"{ALPHA_HASH}.diff").read_bytes())
+        with Database(self.database_path) as database:
+            self.assertEqual(database.import_legacy(self.legacy)["status"], "completed")
+            patch_path.unlink()
+            for path, collection, field in (
+                (self.legacy / "raw" / "upstream_fixed.json", "Bugs", "fix-commits"),
+                (self.legacy / "processed" / "catalog.json", "bugs", "fix_commits"),
+            ):
+                document = json.loads(path.read_bytes())
+                document[collection][1][field][0].update(
+                    title="fs: current beta fix", hash=ALPHA_HASH
+                )
+                path.write_text(json.dumps(document))
+            detail = self.legacy / "raw" / "bugs" / "id-beta456.json"
+            document = json.loads(detail.read_bytes())
+            document["fix-commits"][0].update(title="fs: current beta fix", hash=ALPHA_HASH)
+            detail.write_text(json.dumps(document))
+            (self.legacy / "processed" / "sync_state.json").write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "pending_details": [],
+                        "pending_reports": [],
+                        "pending_patches": [BETA_HASH],
+                    }
+                )
+            )
+            result = database.import_legacy(self.legacy)
+            self.assertEqual(result["status"], "completed", result)
+            self.assertEqual(database.get_bug("id-beta456")["fixes"][0]["hash"], ALPHA_HASH)
+            self.assertEqual(
+                database.connection.execute("SELECT resolved_hash FROM fix_resolutions").fetchone()[
+                    0
+                ],
+                BETA_HASH,
+            )
+
+    def test_matching_new_resolution_replaces_old_patch_dependency(self) -> None:
+        resolution_path = self.legacy / "processed" / "resolved_fix_hashes.json"
+        payload = json.loads(resolution_path.read_bytes())
+        payload["resolutions"][0].update(status="resolved", hash=BETA_HASH)
+        resolution_path.write_text(json.dumps(payload))
+        patch_path = self.legacy / "artifacts" / "patches" / f"{BETA_HASH}.diff"
+        patch_path.write_bytes((patch_path.parent / f"{ALPHA_HASH}.diff").read_bytes())
+        with Database(self.database_path) as database:
+            self.assertEqual(database.import_legacy(self.legacy)["status"], "completed")
+            catalog, details = self.direct_inputs()
+            targets = resolution_targets(
+                catalog["bugs"], {k: json.loads(v) for k, v in details.items()}
+            )
+            self.assertEqual(database.accepted_resolutions(targets)[0]["hash"], BETA_HASH)
+            self.assertEqual(database.accepted_resolutions({"id-beta456": {("other", "")}}), [])
+            patch_path.unlink()
+            payload["resolutions"][0]["hash"] = ALPHA_HASH
+            resolution_path.write_text(json.dumps(payload))
+            result = database.import_legacy(self.legacy)
+            self.assertEqual(result["status"], "completed", result)
             self.assertEqual(database.get_bug("id-beta456")["fixes"][0]["hash"], ALPHA_HASH)
 
     def test_legacy_partial_resolution_is_not_reused_or_preserved_by_an_unresolved_result(

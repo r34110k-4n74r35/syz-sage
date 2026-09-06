@@ -17,7 +17,7 @@
 The default database is `data/db/syz_sage.sqlite3` in the owning checkout.
 An explicit `--database` or data-root override can select another location;
 see [path configuration](usage.md#paths-and-write-boundaries).
-Schema version 4 keeps titles, diagnostic types,
+Schema version 5 keeps titles, diagnostic types,
 subsystem tags, crash sites, complete extracted stacks, and fix sites queryable.
 The original downloaded JSON, reports, and patches remain in `blobs`.
 
@@ -244,7 +244,10 @@ a missing crash line.
 
 Stack frames preserve report order, inline frames, and separate manifestation,
 allocation, free, origin, and other-task sections when those headings are
-available. Unsymbolized frames keep their raw text and unknown fields. The
+available. KMSAN's `Uninit was stored to memory at:` traces are origin history;
+`page last allocated` and `page last free stack trace` identify page history.
+These frames cannot supply a missing crash coordinate. Unsymbolized frames
+keep their raw text and unknown fields. The
 complete report text remains the source of truth for unusual formats and is
 available through `ss show KEY --report` or JSON with `--report`.
 
@@ -321,6 +324,13 @@ active-snapshot selection, and synchronization history intact. A failure rolls b
 changes in that migration. Back up a valuable database before running `ss migrate`;
 the command does not automatically create a backup.
 
+The v4-to-v5 migration repairs crash locations and stack sections with report
+parser revision 3. It reparses current and historical report/crash associations
+from stored blobs in one transaction. Patch extraction remains at revision 2;
+raw reports, patches, snapshot membership, and synchronization history are
+unchanged. Read-only commands require an explicit `ss migrate` before opening
+an older database.
+
 Version 2 did not retain artifact pointers for every historical snapshot.
 Migration backfills associations for the active snapshot where ownership can
 be established, and keeps older source versions and derived rows. It does not
@@ -340,8 +350,13 @@ imports. A pending live detail, report, or referenced patch download prevents
 activation, even when an older cached file exists. Pending report/detail bytes
 are preserved without falsely assigning them to a newly selected crash or URL.
 Historical jobs unrelated to the current listing do not block activation.
-Malformed state or HTML whose bug membership disagrees with the JSON listing
-produces a partial candidate. Missing HTML cannot erase existing subsystem tags.
+Required resolution patches are matched to current fix subjects and repositories,
+including applicable accepted resolutions already stored in SQLite. Obsolete
+resolution records remain history without becoming download requirements.
+Malformed retry state stops online updates without overwriting its bytes; offline
+imports retain it as a completeness error. HTML whose bug membership disagrees
+with the JSON listing produces a partial candidate. Missing HTML cannot erase
+existing subsystem tags.
 
 Title-only fix resolutions are accepted only from a complete import. A partial
 candidate retains its resolution source document but cannot change the active

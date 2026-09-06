@@ -8,12 +8,68 @@ from syz_sage.locations import (
     locate_crash_site,
     locate_kcsan_sites,
     parse_frames,
+    split_manifestation_report,
 )
 from syz_sage.parsing import parse_subsystem_tags
 from syz_sage.patch_locations import extract_fix_locations
 
 
 class LocationParsingTests(unittest.TestCase):
+    def test_kmsan_store_origins_cannot_supply_a_missing_crash_coordinate(self) -> None:
+        report = """BUG: KMSAN: uninit-value in access
+ access+0x1/0x2
+Uninit was stored to memory at:
+ access+0x5/0x9 drivers/example.c:42
+Uninit was stored to memory at:
+ copy_value+0x1/0x2 mm/util.c:30
+Uninit was created at:
+ allocate+0x1/0x2 mm/slab.c:100
+"""
+        site = locate_crash_site("KMSAN: uninit-value in access", report)
+        self.assertEqual(site.function, "access")
+        self.assertIsNone(site.line)
+        self.assertEqual(site.path, "")
+        frames = extract_stack_frames(report)
+        self.assertEqual(
+            [f.section for f in frames], ["manifestation", "origin", "origin", "origin"]
+        )
+        self.assertEqual([f.report_line for f in frames], [2, 4, 6, 8])
+        self.assertNotIn("Uninit was stored", split_manifestation_report(report)[0])
+
+    def test_page_history_headings_keep_allocation_and_free_stacks_separate(self) -> None:
+        report = """BUG: KASAN: use-after-free in access
+ access+0x1/0x2
+Freed by task 1:
+ release+0x1/0x2 mm/slab.c:90
+page_owner tracks the page as allocated
+page last allocated via order 1, migratetype Unmovable
+ access+0x5/0x9 drivers/example.c:42
+page last free stack trace:
+ free_page+0x1/0x2 mm/page_alloc.c:123
+"""
+        frames = extract_stack_frames(report)
+        self.assertEqual(
+            [f.section for f in frames], ["manifestation", "free", "allocation", "free"]
+        )
+        main, freed, allocated = split_manifestation_report(report)
+        self.assertNotIn("release", main)
+        self.assertIn("release", freed)
+        self.assertNotIn("drivers/example.c", freed)
+        self.assertIn("drivers/example.c", allocated)
+        self.assertNotIn("free_page", allocated)
+        self.assertIsNone(locate_crash_site("KASAN: use-after-free in access", report).line)
+
+    def test_timestamped_auxiliary_headings_are_case_insensitive(self) -> None:
+        for heading, expected in (
+            ("UNINIT WAS STORED TO MEMORY AT:", "origin"),
+            ("PAGE LAST ALLOCATED VIA ORDER 0", "allocation"),
+            ("PAGE LAST FREE STACK TRACE:", "free"),
+        ):
+            with self.subTest(heading=heading):
+                report = f" access+0x1/0x2\n[ 12.000] {heading}\n access drivers/test.c:42\n"
+                self.assertIsNone(locate_crash_site("KMSAN: uninit-value in access", report).line)
+                self.assertEqual(extract_stack_frames(report)[1].section, expected)
+
     def test_warning_coordinates_do_not_borrow_later_symbol(self) -> None:
         report = (
             "WARNING: CPU: 0 at include/linux/skbuff.h:2679:2 "

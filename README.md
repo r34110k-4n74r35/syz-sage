@@ -73,7 +73,7 @@ those values, and the type and subsystem categories must both match. Tags are
 exact syzbot labels; `fs` does not automatically include `ext4` or `btrfs`.
 See [filtering](docs/usage.md#filter-fixed-bugs) for pagination and JSON output.
 For a database created by an older version, run `ss migrate` once to backfill
-bug types from stored titles. No download is needed.
+bug types and repair crash-stack interpretation from stored evidence. No download is needed.
 
 ## Documentation
 

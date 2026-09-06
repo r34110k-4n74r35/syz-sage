@@ -12,7 +12,7 @@ from unittest import mock
 
 from syz_sage import location_store, schema_v3, schema_v4
 from syz_sage.cli import main
-from syz_sage.database import Database
+from syz_sage.database import SCHEMA_VERSION, Database
 from syz_sage.storage import temporary_directory
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy_data"
@@ -110,7 +110,7 @@ class LocationStorageTests(unittest.TestCase):
         with contextlib.closing(Database(self.path, read_only=True)) as db:
             self.assertIsNone(db.check_files_current(self.data))
         with Database(self.path) as db:
-            self.assertEqual(db.status()["schema_version"], 4)
+            self.assertEqual(db.status()["schema_version"], SCHEMA_VERSION)
             bug = db.get_bug("extid-alpha123")
             self.assertEqual(bug["subsystems"], ["mm", "net"])
             self.assertEqual(bug["crash_locations"][0]["line_number"], 42)

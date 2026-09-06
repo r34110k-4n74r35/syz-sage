@@ -16,14 +16,15 @@ import json
 import re
 import threading
 import urllib.parse
+from concurrent.futures import CancelledError
 from datetime import datetime, timezone
 
 from syz_sage.artifacts import bounded_results
 from syz_sage.client import normalize_patch_repository
-from syz_sage.parsing import KEY_RE, PayloadError, parse_bug_json
+from syz_sage.parsing import HASH_RE, KEY_RE, PayloadError, parse_bug_json
 from syz_sage.sync import _exclusive_update_lock
 
-from .common import BUG_JSON, PROCESSED, normalize_repo_url, writable_path, write_text
+from .common import BUG_JSON, CLIENT, PROCESSED, normalize_repo_url, writable_path, write_text
 from .fetch_artifacts import fetch_patch, http_get
 
 OUTPUT = PROCESSED / "resolved_fix_hashes.json"
@@ -59,6 +60,8 @@ def resolve_one(key: str, fix: dict) -> dict:
         url = search_url(repo, title)
         result["search_url"] = url
         page = http_get(url, None, timeout=90).decode("utf-8", errors="replace")
+    except CancelledError:
+        raise
     except Exception as exc:
         result["reason"] = f"search failed: {exc}"
         return result
@@ -117,6 +120,7 @@ def main() -> None:
 
 
 def _run(args: argparse.Namespace) -> None:
+    CLIENT.reset_cancellation()
     jobs = load_jobs()
     if args.limit:
         jobs = jobs[: args.limit]
@@ -131,11 +135,27 @@ def _run(args: argparse.Namespace) -> None:
     }
     log(f"searching {len(jobs)} title-only fix records")
     resolved = 0
+    preserved = 0
     for done, (_, future) in enumerate(
-        bounded_results(jobs, lambda job: resolve_one(*job), workers=args.workers), start=1
+        bounded_results(
+            jobs, lambda job: resolve_one(*job), workers=args.workers, cancel=CLIENT.cancel
+        ),
+        start=1,
     ):
         result = future.result()
-        by_identity[(result["bug_key"], result["title"], result["repo"])] = result
+        identity = (result["bug_key"], result["title"], result["repo"])
+        previous = by_identity.get(identity, {})
+        previous_hash = previous.get("hash")
+        if (
+            result.get("status") != "resolved"
+            and previous.get("status") == "resolved"
+            and isinstance(previous_hash, str)
+            and HASH_RE.fullmatch(previous_hash)
+        ):
+            # A failed refresh is not evidence that the known fix disappeared.
+            preserved += 1
+        else:
+            by_identity[identity] = result
         resolved += result.get("status") == "resolved"
         if done % 20 == 0 or done == len(jobs):
             log(f"  title resolution {done}/{len(jobs)} resolved={resolved}")
@@ -154,6 +174,7 @@ def _run(args: argparse.Namespace) -> None:
                 "output": str(OUTPUT),
                 "attempted": len(jobs),
                 "resolved_this_run": resolved,
+                "preserved_previous_resolutions": preserved,
                 "resolved_total": sum(
                     r.get("status") == "resolved" for r in payload["resolutions"]
                 ),

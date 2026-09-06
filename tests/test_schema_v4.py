@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from syz_sage import location_store, schema_v3, schema_v4
-from syz_sage.database import _SCHEMA_V1, Database
+from syz_sage.database import _SCHEMA_V1, SCHEMA_VERSION, Database
 from syz_sage.storage import temporary_directory
 
 
@@ -130,7 +130,7 @@ class SchemaV4Tests(unittest.TestCase):
             with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("source read")):
                 database.initialize()
             connection.set_authorizer(None)
-            self.assertEqual(database.status()["schema_version"], 4)
+            self.assertEqual(database.status()["schema_version"], SCHEMA_VERSION)
             self.assertEqual(
                 [
                     tuple(row)
