@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "id": "internal-alpha",
+  "title": "KASAN: use-after-free in alpha",
+  "status": "fixed on 2026/08/01 12:00",
+  "first-crash": "2026/07/01 09:00",
+  "last-crash": "2026/07/03 09:00",
+  "fix-time": "2026/08/01 12:00",
+  "close-time": "2026/08/01 12:00",
+  "fix-commits": [
+    {
+      "title": "net: fix alpha lifetime",
+      "link": "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+      "branch": "master",
+      "author": "developer@example.com",
+      "author-name": "Example Developer",
+      "date": "2026-07-30T10:00:00Z"
+    }
+  ],
+  "crashes": [
+    {
+      "title": "KASAN: use-after-free in alpha",
+      "syz-reproducer": "/text?tag=ReproSyz&x=alpha",
+      "c-reproducer": "/text?tag=ReproC&x=alpha",
+      "kernel-config": "/text?tag=KernelConfig&x=alpha",
+      "kernel-source-git": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+      "kernel-source-commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "syzkaller-commit": "dddddddddddddddddddddddddddddddddddddddd",
+      "crash-report-link": "/text?tag=CrashReport&x=alpha"
+    }
+  ],
+  "discussions": []
+}

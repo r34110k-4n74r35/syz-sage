@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "id": "beta456",
+  "title": "WARNING in beta",
+  "status": "fixed on 2026/08/02 12:00",
+  "first-crash": "2026/07/02 09:00",
+  "last-crash": "2026/07/04 09:00",
+  "fix-time": "2026/08/02 12:00",
+  "close-time": "2026/08/02 12:00",
+  "fix-commits": [
+    {
+      "title": "fs: guard beta state",
+      "repo": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+      "branch": "master"
+    }
+  ],
+  "crashes": [
+    {
+      "title": "WARNING in beta",
+      "kernel-source-git": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+      "kernel-source-commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "syzkaller-commit": "ffffffffffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "discussions": []
+}

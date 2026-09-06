@@ -1,0 +1,5 @@
+BUG: KASAN: use-after-free in alpha
+Read of size 8 at addr deadbeef by task syz-executor/1234
+
+Call Trace:
+ alpha_read+0x10/0x20 net/alpha.c:42

@@ -1,0 +1,13 @@
+{
+  "generated_at": "2026-09-05T12:10:00+00:00",
+  "method": "exact commit-subject match in declared kernel cgit repository",
+  "resolutions": [
+    {
+      "bug_key": "id-beta456",
+      "title": "fs: guard beta state",
+      "repo": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+      "status": "unresolved",
+      "reason": "exact matches=0"
+    }
+  ]
+}

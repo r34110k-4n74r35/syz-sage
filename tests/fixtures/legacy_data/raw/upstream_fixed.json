@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "Bugs": [
+    {
+      "title": "KASAN: use-after-free in alpha",
+      "link": "/bug?extid=alpha123",
+      "fix-commits": [
+        {
+          "title": "net: fix alpha lifetime",
+          "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repo": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+          "branch": "master"
+        }
+      ]
+    },
+    {
+      "title": "WARNING in beta",
+      "link": "/bug?id=beta456",
+      "fix-commits": [
+        {
+          "title": "fs: guard beta state",
+          "repo": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+          "branch": "master"
+        }
+      ]
+    }
+  ]
+}

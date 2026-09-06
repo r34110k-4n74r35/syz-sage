@@ -1,0 +1,36 @@
+{
+  "generated_at": "2026-09-05T12:00:00+00:00",
+  "source": "https://syzkaller.appspot.com/upstream/fixed?json=1",
+  "source_version": 1,
+  "bugs": [
+    {
+      "key": "extid-alpha123",
+      "title": "KASAN: use-after-free in alpha",
+      "bug_url": "https://syzkaller.appspot.com/bug?extid=alpha123",
+      "json_url": "https://syzkaller.appspot.com/bug?extid=alpha123&json=1",
+      "fix_commits": [
+        {
+          "title": "net: fix alpha lifetime",
+          "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repo": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+          "branch": "master"
+        }
+      ],
+      "primary_fix_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "key": "id-beta456",
+      "title": "WARNING in beta",
+      "bug_url": "https://syzkaller.appspot.com/bug?id=beta456",
+      "json_url": "https://syzkaller.appspot.com/bug?id=beta456&json=1",
+      "fix_commits": [
+        {
+          "title": "fs: guard beta state",
+          "repo": "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+          "branch": "master"
+        }
+      ],
+      "primary_fix_hash": ""
+    }
+  ]
+}
