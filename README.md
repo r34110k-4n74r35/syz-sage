@@ -107,9 +107,16 @@ and inferred patch functions are labeled as such. See the
 ```text
 README.md                Start here
 pyproject.toml           Package metadata, CLI entry points, and tool settings
-src/syz_sage/            Application and shared Python modules
+src/syz_sage/
+  cli/                   Commands, arguments, human views, and terminal progress
+  database/              Persistence, queries, snapshot ingestion, and migrations
+  retrieval/             HTTP, update orchestration, artifact downloads, and retries
+  parsing/               Listing, diagnostic, crash-stack, and patch parsers
+  project/               Configuration, paths, locking, and shared support
 scripts/                 Checkout-local research and maintenance commands
-tests/                   Regression tests and small fixtures
+tests/                   Matching cli/, database/, retrieval/, parsing/, project/
+  workflows/             Tests for the top-level scripts/ tools
+  fixtures/              Small retained-data examples shared by the tests
 docs/                    Usage, database, scripts, and development guides
 data/
   db/syz_sage.sqlite3     SQLite database
@@ -119,6 +126,11 @@ data/
   processed/             Catalog, fix resolutions, and retry state
 outputs/                 Optional results from explicitly run analysis/export commands
 ```
+
+Source and tests share the same main group names. The public entry points remain
+`syz_sage.cli:main` and `syz_sage.database.Database`.
+See the [development guide](docs/development.md#code-organization) for the
+module map and [test commands](docs/development.md#run-checks).
 
 `data/` and `outputs/` are ignored by Git. Inspection prints to the terminal;
 analysis and export files are written to explicitly requested destinations.

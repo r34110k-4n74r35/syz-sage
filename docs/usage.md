@@ -480,7 +480,7 @@ checkout default. The database path is selected in this order:
 1. Explicit `--database FILE`.
 2. `DIR/db/syz_sage.sqlite3` when `--data-dir DIR` was explicitly provided.
 3. `SYZ_SAGE_DATABASE` when set.
-4. `db/syz_sage.sqlite3` beneath the selected data root.
+4. `database/syz_sage.sqlite3` beneath the selected data root.
 
 Thus an explicit `--data-dir` takes precedence over an ambient
 `SYZ_SAGE_DATABASE` for SQLite selection; explicit `--database` takes precedence

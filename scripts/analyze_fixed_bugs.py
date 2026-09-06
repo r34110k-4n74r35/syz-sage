@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from syz_sage.locations import (
+from syz_sage.parsing.crash import (
     CrashSite,
     Frame,
     clean_function,
@@ -31,7 +31,7 @@ from syz_sage.locations import (
     parse_frames,
     split_manifestation_report,
 )
-from syz_sage.parsing import effective_fixes
+from syz_sage.parsing.listing import effective_fixes
 
 from .common import ROOT, writable_path, write_text
 

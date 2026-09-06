@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from syz_sage.storage import writable_path
+from syz_sage.project.storage import writable_path
 
 
 def main() -> int:

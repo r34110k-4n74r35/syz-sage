@@ -21,8 +21,7 @@ from collections.abc import Callable
 from concurrent.futures import CancelledError
 from pathlib import Path
 
-from syz_sage.artifacts import DownloadJob, bounded_results, fetch_artifact
-from syz_sage.parsing import (
+from syz_sage.parsing.listing import (
     HASH_RE,
     KEY_RE,
     MAX_BUG_KEY_LENGTH,
@@ -35,8 +34,9 @@ from syz_sage.parsing import (
     valid_patch,
     valid_report,
 )
-from syz_sage.retry_state import SyncState, load_sync_state, save_sync_state
-from syz_sage.sync import _exclusive_update_lock
+from syz_sage.project.storage import exclusive_update_lock as _exclusive_update_lock
+from syz_sage.retrieval.artifacts import DownloadJob, bounded_results, fetch_artifact
+from syz_sage.retrieval.retry_state import SyncState, load_sync_state, save_sync_state
 
 from .common import (
     BUG_JSON,

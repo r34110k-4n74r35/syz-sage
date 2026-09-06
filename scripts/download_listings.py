@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import argparse
 
-from syz_sage.parsing import PayloadError, parse_listing, validate_listing_membership
-from syz_sage.sync import _exclusive_update_lock
+from syz_sage.parsing.listing import PayloadError, parse_listing, validate_listing_membership
+from syz_sage.project.storage import exclusive_update_lock as _exclusive_update_lock
 
 from .common import CLIENT, DASHBOARD, RAW, ensure_dirs, write_bytes
 

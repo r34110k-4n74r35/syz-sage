@@ -19,10 +19,10 @@ import urllib.parse
 from concurrent.futures import CancelledError
 from datetime import datetime, timezone
 
-from syz_sage.artifacts import bounded_results
-from syz_sage.client import normalize_patch_repository
-from syz_sage.parsing import HASH_RE, KEY_RE, PayloadError, parse_bug_json
-from syz_sage.sync import _exclusive_update_lock
+from syz_sage.parsing.listing import HASH_RE, KEY_RE, PayloadError, parse_bug_json
+from syz_sage.project.storage import exclusive_update_lock as _exclusive_update_lock
+from syz_sage.retrieval.artifacts import bounded_results
+from syz_sage.retrieval.client import normalize_patch_repository
 
 from .common import BUG_JSON, CLIENT, PROCESSED, normalize_repo_url, writable_path, write_text
 from .fetch_artifacts import fetch_patch, http_get

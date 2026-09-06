@@ -4,16 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from syz_sage.artifacts import atomic_write
-from syz_sage.client import SyzbotClient, normalize_patch_repository
-from syz_sage.parsing import DEFAULT_DASHBOARD
-from syz_sage.storage import (
-    make_directory,
-    project_root,
-)
-from syz_sage.storage import (
-    writable_path as writable_path,
-)
+from syz_sage.parsing.listing import DEFAULT_DASHBOARD
+from syz_sage.project.storage import make_directory, project_root
+from syz_sage.project.storage import writable_path as writable_path
+from syz_sage.retrieval.artifacts import atomic_write
+from syz_sage.retrieval.client import SyzbotClient, normalize_patch_repository
 
 ROOT = project_root()
 DATA = ROOT / "data"

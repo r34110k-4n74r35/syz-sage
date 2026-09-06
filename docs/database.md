@@ -123,7 +123,7 @@ Unknown titles use `other`. `ss filter --help` identifies supported type values;
 
 This field is derived locally, not a dedicated syzbot JSON field and not a
 claim about severity, exploitability, or root cause. The original title remains
-unchanged. The classifier lives in [bug_types.py](../src/syz_sage/bug_types.py);
+unchanged. The classifier lives in [parsing/bug_types.py](../src/syz_sage/parsing/bug_types.py);
 classification changes that affect retained rows require a migration/backfill,
 not merely a change to the helper.
 
@@ -190,16 +190,19 @@ Treat older fallback/source-reference URLs as retained metadata rather than
 proof of the exact HTTP endpoint that supplied a historical file.
 
 The implementation entry points are `Database.ingest_files()` and
-`Database._insert_bug_children()` in [database.py](../src/syz_sage/database.py),
-`parse_subsystem_tags()` in [parsing.py](../src/syz_sage/parsing.py),
+`Database._insert_bug_children()` in [database/repository.py](../src/syz_sage/database/repository.py).
+Their implementations are in [database/files.py](../src/syz_sage/database/files.py),
+[database/snapshot.py](../src/syz_sage/database/snapshot.py), and
+[database/writes.py](../src/syz_sage/database/writes.py). Parsing starts with
+`parse_subsystem_tags()` in [parsing/listing.py](../src/syz_sage/parsing/listing.py),
 `locate_crash_site()` / `extract_stack_frames()` in
-[locations.py](../src/syz_sage/locations.py), and `extract_fix_locations()` in
-[patch_locations.py](../src/syz_sage/patch_locations.py).
-[location_store.py](../src/syz_sage/location_store.py) connects these extractions
+[parsing/crash.py](../src/syz_sage/parsing/crash.py), and `extract_fix_locations()` in
+[parsing/patch.py](../src/syz_sage/parsing/patch.py).
+[location_store.py](../src/syz_sage/database/location_store.py) connects these extractions
 to their report, patch, and snapshot versions;
-[schema_v3.py](../src/syz_sage/schema_v3.py) defines snapshot artifact associations
+[schema_v3.py](../src/syz_sage/database/schema_v3.py) defines snapshot artifact associations
 and their ownership constraints.
-[ingestion.py](../src/syz_sage/ingestion.py) shares per-run file observations,
+[database/ingestion.py](../src/syz_sage/database/ingestion.py) shares per-run file observations,
 fingerprints, and prepared artifact inspections. These are in-memory helpers;
 the database schema and downloaded artifact formats remain unchanged.
 
