@@ -126,7 +126,7 @@ class DatabaseProgressTests(unittest.TestCase):
 
         with Database(self.path, on_progress=observe) as database:
             self.assertEqual(database.status()["schema_version"], SCHEMA_VERSION)
-            self.assertEqual(observed_versions, [SCHEMA_VERSION])
+            self.assertEqual(observed_versions, [6])
             self.assertEqual(
                 [(event.completed, event.total) for event in self.phase("migrate-v6-reports")],
                 [(0, 1), (1, 1)],

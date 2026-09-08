@@ -91,6 +91,8 @@ def human_bug(bug: dict[str, Any], include_report: bool, include_stack: bool = F
     metadata: list[tuple[str, object]] = [
         ("Key", bug.get("key", "")),
         ("Bug type", bug_type_label(bug.get("bug_type"))),
+        ("Failure pattern", bug.get("family") or "unknown"),
+        ("Access", bug.get("access_mode") or "unknown"),
     ]
     if bug.get("status"):
         metadata.append(("Status", bug["status"]))

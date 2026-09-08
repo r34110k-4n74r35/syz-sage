@@ -6,6 +6,7 @@ inspection, and transactional ingestion while this module preserves the API.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import sqlite3
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
@@ -27,6 +28,7 @@ from . import (
     schema_v4,
     schema_v5,
     schema_v6,
+    schema_v7,
     snapshot,
     writes,
 )
@@ -95,6 +97,14 @@ class Database:
             self._connection.row_factory = sqlite3.Row
             self._connection.execute("PRAGMA foreign_keys = ON")
             self._connection.execute("PRAGMA busy_timeout = 5000")
+            self._connection.create_function(
+                "source_glob",
+                2,
+                lambda pattern, value: int(
+                    isinstance(value, str) and fnmatch.fnmatchcase(value, pattern)
+                ),
+                deterministic=True,
+            )
             if not self._read_only:
                 self._connection.execute("PRAGMA journal_mode = WAL")
                 self._connection.execute("PRAGMA synchronous = NORMAL")
@@ -182,6 +192,12 @@ class Database:
             if self._read_only:
                 raise RuntimeError("database schema needs migration; run 'ss migrate' first")
             schema_v6.migrate(connection, on_progress=migration_progress)
+            version = 6
+        if version == 6:
+            if self._read_only:
+                raise RuntimeError("database schema needs migration; run 'ss migrate' first")
+            schema_v7.migrate(connection, on_progress=migration_progress)
+        schema_v7.validate(connection)
         if not bool(connection.execute("PRAGMA foreign_keys").fetchone()[0]):
             raise RuntimeError("SQLite foreign-key enforcement could not be enabled")
         if creating:
@@ -579,6 +595,17 @@ class Database:
         *,
         bug_types: Sequence[str] = (),
         subsystems: Sequence[str] = (),
+        families: Sequence[str] = (),
+        access_modes: Sequence[str] = (),
+        crash_files: Sequence[str] = (),
+        fix_files: Sequence[str] = (),
+        crash_functions: Sequence[str] = (),
+        fix_functions: Sequence[str] = (),
+        has_c_repro: bool | None = None,
+        has_report: bool | None = None,
+        has_patch: bool | None = None,
+        max_fix_files: int | None = None,
+        max_patch_lines: int | None = None,
         query: str | None = None,
         limit: int | None = 20,
         offset: int = 0,
@@ -593,6 +620,17 @@ class Database:
             self,
             bug_types=bug_types,
             subsystems=subsystems,
+            families=families,
+            access_modes=access_modes,
+            crash_files=crash_files,
+            fix_files=fix_files,
+            crash_functions=crash_functions,
+            fix_functions=fix_functions,
+            has_c_repro=has_c_repro,
+            has_report=has_report,
+            has_patch=has_patch,
+            max_fix_files=max_fix_files,
+            max_patch_lines=max_patch_lines,
             query=query,
             limit=limit,
             offset=offset,
@@ -601,6 +639,10 @@ class Database:
     def filter_values(self) -> dict[str, list[dict[str, Any]]]:
         """Count distinct active bugs for each stored type and exact subsystem tag."""
         return queries.filter_values(self)
+
+    def research_rows(self, **criteria: Any) -> list[dict[str, Any]]:
+        """Select active bugs and fix/location evidence with filter_bugs criteria."""
+        return queries.research_rows(self, **criteria)
 
     def _list_filtered_rows(
         self,

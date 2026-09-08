@@ -7,7 +7,7 @@ Use the project virtual environment from the
 
 ## Code organization
 
-Application code lives in `src/syz_sage/`. Source and tests use the same five
+Application code lives in `src/syz_sage/`. Source and tests use the same six
 main groups, making the corresponding implementation or tests easy to find:
 
 | Source package | Matching tests | Responsibility |
@@ -16,6 +16,7 @@ main groups, making the corresponding implementation or tests easy to find:
 | `src/syz_sage/database/` | `tests/database/` | Connections, imports, snapshots, queries, schema, and migrations |
 | `src/syz_sage/retrieval/` | `tests/retrieval/` | HTTP, update orchestration, artifact downloads, catalogs, and retries |
 | `src/syz_sage/parsing/` | `tests/parsing/` | Listings, diagnostic types, crash stacks, and patch locations |
+| `src/syz_sage/analysis/` | `tests/analysis/` | Evidence-based crash-to-fix relationships |
 | `src/syz_sage/project/` | `tests/project/` | Configuration, filesystem paths, locking, and shared progress events |
 
 Top-level `scripts/` maps to `tests/workflows/`, since those tools live outside
@@ -27,7 +28,7 @@ Only package metadata and `__main__.py` remain at the source package root.
 | Application responsibility | Modules |
 |---|---|
 | CLI dispatch, paths, JSON output, and exit codes | [cli/commands.py](../src/syz_sage/cli/commands.py) |
-| Argument definitions and validation | [cli/arguments.py](../src/syz_sage/cli/arguments.py), [cli/help.py](../src/syz_sage/cli/help.py) |
+| Argument definitions and validation | [cli/arguments.py](../src/syz_sage/cli/arguments.py), [cli/research_arguments.py](../src/syz_sage/cli/research_arguments.py), [cli/help.py](../src/syz_sage/cli/help.py) |
 | Update orchestration and download selection | [retrieval/sync.py](../src/syz_sage/retrieval/sync.py) |
 | Update options, listing scope, and result contracts | [retrieval/models.py](../src/syz_sage/retrieval/models.py) |
 | Retained listing comparison and catalog generation | [retrieval/catalog.py](../src/syz_sage/retrieval/catalog.py) |
@@ -38,6 +39,10 @@ Only package metadata and `__main__.py` remain at the source package root.
 | Listing/detail validation, URLs, and subsystem tags | [parsing/listing.py](../src/syz_sage/parsing/listing.py) |
 | Bug-type, crash-stack, and patch interpretation | [parsing/bug_types.py](../src/syz_sage/parsing/bug_types.py), [parsing/crash.py](../src/syz_sage/parsing/crash.py), [parsing/patch.py](../src/syz_sage/parsing/patch.py) |
 | Path defaults, explicit destinations, and data-root locking | [project/config.py](../src/syz_sage/project/config.py), [project/storage.py](../src/syz_sage/project/storage.py) |
+| Failure/access classification | [parsing/characteristics.py](../src/syz_sage/parsing/characteristics.py), [database/characteristics.py](../src/syz_sage/database/characteristics.py) |
+| Saved patch inspection and explanations | [database/evidence.py](../src/syz_sage/database/evidence.py), [analysis/evidence.py](../src/syz_sage/analysis/evidence.py) |
+| Related cases, comparisons, statistics | [database/research.py](../src/syz_sage/database/research.py), [cli/presentation/research.py](../src/syz_sage/cli/presentation/research.py) |
+| Explicit crash-specific downloads | [retrieval/selective.py](../src/syz_sage/retrieval/selective.py) |
 
 `database/repository.py` owns connections and transactions. The package exports
 the stable `syz_sage.database.Database` API. Its explicit delegates keep implementation responsibilities
@@ -52,8 +57,9 @@ inside `database/`:
 | Transactional snapshot ingestion and activation | [database/snapshot.py](../src/syz_sage/database/snapshot.py) |
 | Blob/document writes and normalized child records | [database/writes.py](../src/syz_sage/database/writes.py) |
 | Bug/filter queries, coverage, and integrity checks | [database/queries.py](../src/syz_sage/database/queries.py) |
+| Cached completeness checks for patch-size metrics | [database/patch_metrics.py](../src/syz_sage/database/patch_metrics.py) |
 | Derived-location indexing and v2 migration | [database/location_store.py](../src/syz_sage/database/location_store.py) |
-| Subsequent schema migrations | [database/schema_v3.py](../src/syz_sage/database/schema_v3.py), [database/schema_v4.py](../src/syz_sage/database/schema_v4.py), [database/schema_v5.py](../src/syz_sage/database/schema_v5.py), [database/schema_v6.py](../src/syz_sage/database/schema_v6.py) |
+| Subsequent schema migrations | [schema_v3.py](../src/syz_sage/database/schema_v3.py), [schema_v4.py](../src/syz_sage/database/schema_v4.py), [schema_v5.py](../src/syz_sage/database/schema_v5.py), [schema_v6.py](../src/syz_sage/database/schema_v6.py), [schema_v7.py](../src/syz_sage/database/schema_v7.py) |
 
 The snapshot transaction stays together so its validation, source retention,
 and activation rules can be reviewed as one operation. The smaller preparation,
@@ -230,9 +236,17 @@ rows are versioned by parser revision; changing the parser alone does not
 repair a user's already indexed data. Provide an explicit transactional
 reindexing/migration path when stored interpretation changes.
 
-Report and patch parsers have separate revision constants. Schema v6 uses
+Report and patch parsers have separate revision constants. Schema v7 uses
 report revision 4 and patch revision 2; a report-only repair does not reindex
 unchanged patch locations.
+
+Schema 7 stores failure/access classifier version 1 separately. Selection and
+research commands share `Database.filter_bugs`/`research_rows`; aggregate code must
+deduplicate bug/value counts and distinguish bugs from commits. Explanations use
+saved evidence without comparing line coordinates across kernel builds. Optional
+`fetch` writes crash-specific files under the chosen data root without changing
+SQLite or representative artifact pointers. Its nested files are excluded from
+ordinary ingestion fingerprints. Tests must preserve those boundaries.
 
 For an ingestion change, preserve complete-snapshot activation, retries across
 interruption, unchanged-update behavior, and exact raw evidence. For a new
@@ -253,7 +267,7 @@ Keep console entry points and script launch paths working across any module move
 
 ## Test organization
 
-`tests/` mirrors the five source package names. The additional `workflows/`
+`tests/` mirrors the six source package names. The additional `workflows/`
 group covers the top-level `scripts/` directory:
 
 ```text
@@ -262,6 +276,7 @@ tests/
   database/     Ingestion, snapshots, queries, migrations, and stored evidence
   retrieval/    HTTP, downloads, update stages, retries, and locking
   parsing/      Listing, title, crash, and patch interpretation
+  analysis/     Evidence-based per-hunk relationships and stack membership
   project/      Paths, configuration, packaging, and JavaScript path helpers
   workflows/    Checkout research and maintenance scripts
   fixtures/     Small retained-data examples

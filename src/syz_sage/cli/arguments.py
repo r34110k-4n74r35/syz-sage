@@ -9,6 +9,12 @@ from .. import __version__
 from ..parsing.bug_types import BUG_TYPES
 from ..project.config import DATABASE_ENV
 from .help import HelpParser
+from .research_arguments import (
+    OPTIONAL_CRITERIA,
+    SEQUENCE_CRITERIA,
+    add_research_filters,
+    validate_research_filters,
+)
 
 
 def _filter_text(value: str) -> str:
@@ -162,6 +168,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="include the full representative crash report",
     )
+    content.add_argument(
+        "--patch", metavar="HASH", help="display the saved diff for this fix commit"
+    )
+    content.add_argument(
+        "--file",
+        dest="patch_file",
+        metavar="PATTERN",
+        help="case-sensitive file glob within --patch",
+    )
+    content.add_argument(
+        "--explain",
+        action="store_true",
+        help="explain observed crash-to-fix relationships with source evidence",
+    )
     show.add_argument_group("Output").add_argument(
         "--json",
         action="store_true",
@@ -240,6 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show active types and subsystem tags with counts; use alone or with --json",
     )
+    add_research_filters(filtering)
     pagination = filtering.add_argument_group("Pagination")
     page_size = pagination.add_mutually_exclusive_group()
     page_size.add_argument(
@@ -258,6 +279,85 @@ def build_parser() -> argparse.ArgumentParser:
     filter_output.add_argument(
         "--urls-only", action="store_true", help="print only complete bug URLs, one per line"
     )
+
+    stats = commands.add_parser(
+        "stats",
+        help="describe selected bugs, evidence, and fix sizes",
+        description="Offline statistics; all matches form the denominator.",
+    )
+    stats.add_argument(
+        "--type",
+        "--bug-type",
+        dest="bug_types",
+        action="extend",
+        nargs="+",
+        type=_filter_type,
+        metavar="TYPE",
+        help="diagnostic types (repeatable)",
+    )
+    stats.add_argument(
+        "--subsystem",
+        dest="subsystems",
+        action="extend",
+        nargs="+",
+        type=_filter_text,
+        metavar="TAG",
+        help="exact saved subsystem tags",
+    )
+    stats.add_argument("--query", type=_filter_text, metavar="TEXT", help="title/key substring")
+    add_research_filters(stats)
+    stats.add_argument(
+        "--top",
+        type=int,
+        default=10,
+        metavar="N",
+        help="maximum entries per human table (default: 10); JSON includes all",
+    )
+    stats.add_argument("--json", action="store_true", help="print complete structured statistics")
+
+    related = commands.add_parser(
+        "related",
+        help="find bugs sharing fixes or affected code",
+        description="Explain concrete shared evidence; bugs are never merged.",
+    )
+    related.add_argument("key", metavar="KEY_OR_URL", help="bug to find related cases for")
+    related.add_argument(
+        "--limit", type=int, default=10, metavar="N", help="maximum matches (default: 10)"
+    )
+    related.add_argument("--json", action="store_true", help="print structured matches and reasons")
+
+    compare = commands.add_parser("compare", help="compare the evidence of two fixed bugs")
+    compare.add_argument("keys", nargs=2, metavar="KEY_OR_URL", help="two different bugs")
+    compare.add_argument("--json", action="store_true", help="print structured comparison")
+
+    fetch = commands.add_parser(
+        "fetch",
+        help="download selected evidence for one saved crash",
+        description="Explicitly fetch one bug's crash-specific evidence; no code is executed.",
+    )
+    fetch.add_argument("key", metavar="KEY_OR_URL", help="active bug whose evidence to fetch")
+    for flag, label in (
+        ("c-repro", "C reproducer"),
+        ("syz-repro", "syz reproducer"),
+        ("config", "kernel configuration"),
+        ("report", "crash report"),
+    ):
+        fetch.add_argument(
+            "--" + flag, action="store_true", help="retrieve the selected crash's " + label
+        )
+    fetch.add_argument(
+        "--crash",
+        type=int,
+        metavar="N",
+        help="zero-based saved crash ordinal (default: representative crash)",
+    )
+    fetch.add_argument(
+        "--refresh", action="store_true", help="refresh selected evidence even if cached"
+    )
+    fetch.add_argument(
+        "--json", action="store_true", help="print structured results without progress"
+    )
+    fetch.add_argument("--quiet", action="store_true", help="hide progress; retain result summary")
 
     status = commands.add_parser(
         "status",
@@ -337,10 +437,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_filter(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    validate_research_filters(parser, args)
     if args.list_values and (
-        args.bug_types
-        or args.subsystems
-        or args.query is not None
+        any(getattr(args, name, None) for name in SEQUENCE_CRITERIA)
+        or any(getattr(args, name, None) is not None for name in OPTIONAL_CRITERIA)
         or args.limit is not None
         or args.offset is not None
         or args.all

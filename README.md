@@ -49,6 +49,7 @@ ss filter --type kasan --subsystem fs
 ss list --query use-after-free --limit 5
 ss show extid-0a884bc2d304ce4af70f
 ss show extid-0a884bc2d304ce4af70f --stack
+ss stats --type kasan --subsystem fs
 ss check
 ```
 
@@ -75,11 +76,20 @@ See [filtering](docs/usage.md#filter-fixed-bugs) for pagination and JSON output.
 For a database created by an older version, run `ss migrate` once to backfill
 bug types and repair crash-stack interpretation from stored evidence. No download is needed.
 
+For deeper inspection, filter by failure pattern, access mode, source paths,
+functions, or evidence availability; read saved diffs with `ss show KEY --patch HASH`;
+and inspect per-hunk relationships with `ss show KEY --explain`. `ss related KEY`
+and `ss compare KEY1 KEY2` show concrete shared evidence. Explicit `ss fetch`
+downloads selected crash evidence without executing reproducers. See
+[finding and studying bugs](docs/analysis.md) for all six workflows.
+Existing databases need `ss migrate` for the schema 7 classification fields.
+
 ## Documentation
 
 | Guide | What it covers |
 |---|---|
 | [Usage](docs/usage.md) | Commands, incremental updates, retries, JSON, colors, paths, and configuration. |
+| [Find and study bugs](docs/analysis.md) | Source/failure filters, patch inspection, explanations, comparisons, statistics, and selective downloads. |
 | [Database and provenance](docs/database.md) | Tables, exact raw-data sources, crash/fix interpretation, SQL queries, and migrations. |
 | [Research and maintenance scripts](docs/scripts.md) | Script inputs/outputs, optional report/workbook generation, and mirror maintenance. |
 | [Development](docs/development.md) | Source layout, module responsibilities, data flow, and checks for future changes. |
@@ -112,9 +122,10 @@ src/syz_sage/
   database/              Persistence, queries, snapshot ingestion, and migrations
   retrieval/             HTTP, update orchestration, artifact downloads, and retries
   parsing/               Listing, diagnostic, crash-stack, and patch parsers
+  analysis/              Evidence-based crash-to-fix explanations
   project/               Configuration, paths, locking, and shared support
 scripts/                 Checkout-local research and maintenance commands
-tests/                   Matching cli/, database/, retrieval/, parsing/, project/
+tests/                   Matching cli/, database/, retrieval/, parsing/, analysis/, project/
   workflows/             Tests for the top-level scripts/ tools
   fixtures/              Small retained-data examples shared by the tests
 docs/                    Usage, database, scripts, and development guides

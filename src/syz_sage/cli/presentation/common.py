@@ -39,7 +39,7 @@ def value_tone(label: str, value: object) -> str:
         return "success" if text != "0" else "muted"
     if label == "Reused":
         return "accent" if text != "0" else "muted"
-    if label in {"Bug type", "Types", "Subsystems", "Subsystem tags"}:
+    if label in {"Bug type", "Types", "Subsystems", "Subsystem tags", "Failure pattern", "Access"}:
         return "tag"
     if label == "Function":
         return "function"

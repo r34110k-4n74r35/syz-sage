@@ -41,6 +41,14 @@ command; command-specific options follow it.
 | `check` | Verify database consistency and stored content hashes. | Offline, read-only. |
 | `import-legacy [DIR]` | Index a retained filesystem mirror. | Offline; database writes when needed. |
 | `migrate` | Upgrade an existing database from stored source blobs. | Offline; writes an older database during migration. |
+| `related KEY` | Find bugs sharing fixes, functions, or source paths. | Offline, read-only. |
+| `compare KEY1 KEY2` | Compare two bugs and their shared evidence. | Offline, read-only. |
+| `stats` | Describe all bugs matching selected criteria. | Offline, read-only. |
+| `fetch KEY` | Download explicitly requested files for one saved crash. | Network as needed; writes optional artifact files, leaves SQLite unchanged. |
+
+See [finding and studying bugs](analysis.md) for failure/access/source filters,
+`show --patch` and `--explain`, related cases, comparisons, statistics, and selective
+downloads. These additions use schema 7; migrate an older database first.
 
 `show`, `list`, and `filter` use the **active complete snapshot**. Retained historical
 bugs or bugs present only in a partial candidate do not appear in these
@@ -86,6 +94,9 @@ ss show extid-0a884bc2d304ce4af70f --json --report
 | `--stack` | Display every extracted frame from the representative report, including inline and allocation/free traces. |
 | `--report` | Include the complete saved representative report text. |
 | `--json` | Return structured metadata and the extracted stack; include the report body only with `--report`. |
+| `--patch HASH` | Display a saved fix diff selected by full commit hash. |
+| `--file PATTERN` | Select old/new paths within `--patch` using a case-sensitive glob. |
+| `--explain` | Show evidence and per-hunk crash-to-fix relationships. |
 
 Routine retrieval saves **one representative crash report per bug**, plus
 metadata for every crash entry supplied by syzbot. Kernel configs and C/syz
@@ -93,6 +104,9 @@ reproducers are recorded as URLs; their contents and other historical crash
 reports are not downloaded by `ss update`. See the
 [database guide](database.md) for coverage, location interpretation, and the
 mapping from source files to database fields.
+
+Use explicit `ss fetch KEY --c-repro --config` or `--report --crash N` when a study
+needs extra evidence; see [selective downloads](analysis.md#fetch-additional-evidence-for-one-crash).
 
 ### C reproducer availability
 
@@ -113,8 +127,9 @@ The URL list removes duplicates while preserving crash order. A valid link
 makes the status `available` even if another crash entry is malformed.
 Availability describes what the saved data reports; it does not mean a C
 reproducer has been downloaded locally or its URL has been checked over HTTP.
-These fields are derived during the read-only lookup, so existing indexed
-bugs need no migration, re-import, or download to display them. See
+These fields derive from retained detail metadata; schema 7 also caches them for
+filtering and statistics. Upgrade an older database with `ss migrate`; no new
+download is needed. See
 [C reproducer sources](database.md#c-reproducer-metadata) for field provenance.
 
 ## Filter fixed bugs
@@ -137,8 +152,9 @@ substring match against the title or key.
 Subsystem tags match exactly. For example, `fs` selects bugs tagged `fs`; use
 `--subsystem fs ext4 btrfs` to include those three distinct labels. No inferred
 filesystem hierarchy or source-path classification is applied. Untagged bugs
-remain visible without a subsystem constraint. `--list-values` shows the types
-and tags actually present in the active database, with their bug counts.
+remain visible without a subsystem constraint. `--list-values` shows the types,
+tags, failure patterns, and access modes actually present in the active database,
+with their bug counts.
 Use it alone or with `--json`; selection and pagination options do not apply
 to value discovery.
 
@@ -360,6 +376,10 @@ Schema version 6 prevents other-task backtraces and unwind dumps from supplying
 a missing crash coordinate. It repairs current and historical report associations
 from saved report bytes, preserving the full stack and leaving patches unchanged.
 
+Schema version 7 adds failure-pattern/access classifications and evidence provenance
+from retained titles and representative reports. It also supports source/evidence
+filters and complete-patch size metrics. See [the analysis guide](analysis.md).
+
 Read-only `show`, `list`, `filter`, `status`, and `check` report when migration is
 required. Run `ss migrate` before retrying them. Writable opens during update
 or import can perform the upgrade automatically. See
@@ -412,7 +432,7 @@ empty. Check the exit status before parsing stdout.
 | `0` | Success; also a partial update explicitly allowed by `--allow-partial`. |
 | `1` | Retrieval, database, path, or validation failure; partial update by default; failed consistency check. |
 | `2` | Invalid CLI arguments, or a missing database for inspection/migration. |
-| `3` | `show` did not find the requested bug in the active snapshot. |
+| `3` | `show`, `related`, `compare`, or `fetch` did not find a requested active bug. |
 | `130` | Interrupted with Ctrl-C. |
 
 An invalid `show` key/URL is a validation failure (`1`). A valid identifier

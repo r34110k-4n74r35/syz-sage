@@ -17,7 +17,7 @@ from ..retrieval.resolutions import (
     resolution_matches,
     resolution_targets,
 )
-from . import location_store
+from . import characteristics, location_store, patch_metrics
 from .ingestion import UNPARSED, FileInventory
 from .records import (
     _HASH_RE,
@@ -927,6 +927,7 @@ def _ingest_snapshot(
                     location_store.index_patch(
                         connection, patch_version_id, prepared=inspection.prepared
                     )
+                    patch_metrics.index_patch(connection, patch_version_id, payload=data)
                     connection.execute(
                         "INSERT INTO snapshot_patches VALUES (?, ?, ?, ?)",
                         (snapshot_id, commit_hash, patch_version_id, source),
@@ -940,6 +941,9 @@ def _ingest_snapshot(
                 if commit_hash not in expected_hashes:
                     summary["patches"]["orphan_files"] += 1
 
+            characteristics.index_snapshot(
+                connection, snapshot_id, on_progress=database._on_progress
+            )
             report_progress(
                 database._on_progress, "commit-snapshot", "Saving snapshot result", 0, 1
             )

@@ -12,13 +12,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..analysis.evidence import build_explanation
 from ..database import Database
+from ..database.evidence import patch_view
+from ..database.research import compare_bugs, related_bugs, statistics
 from ..parsing.listing import KEY_RE, MAX_BUG_KEY_LENGTH, absolute_syzbot_url, key_from_link
 from ..project.config import DATA_DIR_ENV, DATABASE_ENV, DataPaths
 from ..project.progress_events import ProgressEvent
 from ..project.storage import exclusive_update_lock as _exclusive_update_lock
 from ..project.storage import writable_path
 from ..retrieval.models import UpdateOptions
+from ..retrieval.selective import fetch_evidence
 from ..retrieval.sync import Updater
 from .arguments import build_parser as _parser
 from .arguments import validate_filter
@@ -44,7 +48,10 @@ from .display import (
 from .display import (
     human_update as _human_update,
 )
+from .presentation.evidence import human_explanation, human_patch
+from .presentation.research import human_compare, human_fetch, human_related, human_statistics
 from .progress import ProgressDisplay
+from .research_arguments import selection, validate_research_filters
 from .terminal import safe_text
 
 
@@ -57,7 +64,7 @@ def _paths(args: argparse.Namespace) -> tuple[DataPaths, Path]:
         if configured:
             database_override = Path(configured)
     data_override = args.data_dir or os.environ.get(DATA_DIR_ENV)
-    needs_data_root = args.command == "update" or (
+    needs_data_root = args.command in {"update", "fetch"} or (
         args.command == "import-legacy" and args.source is None
     )
     if data_override:
@@ -102,6 +109,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = parser.parse_args(list(argv) if argv is not None else None)
         if args.command == "filter":
             validate_filter(parser, args)
+        if args.command == "stats":
+            validate_research_filters(parser, args)
+            if args.top < 1:
+                parser.error("--top must be positive")
+        if args.command == "show" and args.patch_file and not args.patch:
+            parser.error("--file requires --patch HASH")
+        if args.command == "fetch":
+            if not any((args.c_repro, args.syz_repro, args.config, args.report)):
+                parser.error("fetch requires --c-repro, --syz-repro, --config, or --report")
+            if args.crash is not None and args.crash < 0:
+                parser.error("--crash must be a non-negative saved ordinal")
         paths, database_path = _paths(args)
 
         if args.command == "update":
@@ -165,6 +183,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
 
+        if args.command == "fetch":
+            key = _show_key(args.key)
+            with Database(database_path, read_only=True) as database:
+                bug = database.get_bug(key)
+            if bug is None:
+                raise LookupError(f"Bug not found: {key}")
+            enabled = not (args.json or args.quiet)
+            with ProgressDisplay("Fetching selected evidence", enabled=enabled) as progress:
+                result = fetch_evidence(
+                    paths,
+                    bug,
+                    c_repro=args.c_repro,
+                    syz_repro=args.syz_repro,
+                    config=args.config,
+                    report=args.report,
+                    crash=args.crash,
+                    refresh=args.refresh,
+                    on_progress=progress if enabled else None,
+                )
+                progress.finish(success=bool(result["ok"]))
+            _dump(result) if args.json else human_fetch(result)
+            return 0 if result["ok"] else 1
+
         if args.command == "migrate":
             enabled = not (args.json or args.quiet)
             with (
@@ -203,6 +244,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = database.status()
                 _dump(result) if args.json else _human_status(result)
                 return 0
+            if args.command == "stats":
+                result = statistics(database, **selection(args))
+                _dump(result) if args.json else human_statistics(result, top=args.top)
+                return 0
+            if args.command == "related":
+                result = related_bugs(database, _show_key(args.key), limit=args.limit)
+                _dump(result) if args.json else human_related(result)
+                return 0
+            if args.command == "compare":
+                result = compare_bugs(database, *(_show_key(key) for key in args.keys))
+                _dump(result) if args.json else human_compare(result)
+                return 0
             if args.command == "list":
                 if args.limit < 1 or args.offset < 0:
                     parser.error("--limit must be positive and --offset cannot be negative")
@@ -215,9 +268,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _dump(values) if args.json else human_filter_values(values)
                     return 0
                 result = database.filter_bugs(
-                    bug_types=args.bug_types,
-                    subsystems=args.subsystems,
-                    query=args.query,
+                    **selection(args),
                     limit=args.limit,
                     offset=args.offset,
                 )
@@ -232,17 +283,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             if args.command == "show":
                 key = _show_key(args.key)
-                bug = database.get_bug(key)
-                if bug is None:
-                    error(f"Bug not found in the active snapshot: {key}")
-                    return 3
+                with database._read_transaction():
+                    bug = database.get_bug(key)
+                    if bug is None:
+                        error(f"Bug not found in the active snapshot: {key}")
+                        return 3
+                    if args.explain:
+                        bug["explanation"] = build_explanation(bug)
+                    if args.patch:
+                        bug["patch"] = patch_view(database, key, args.patch, args.patch_file)
                 if not args.report and bug.get("report"):
                     bug["report"].pop("text", None)
-                _dump(bug) if args.json else _human_bug(bug, args.report, args.stack)
+                if args.json:
+                    _dump(bug)
+                else:
+                    if not (args.explain or args.patch) or args.report or args.stack:
+                        _human_bug(bug, args.report, args.stack)
+                    if args.explain:
+                        human_explanation(bug["explanation"])
+                    if args.patch:
+                        human_patch(bug["patch"])
                 return 0
     except KeyboardInterrupt:
         error("Interrupted.")
         return 130
+    except LookupError as exc:
+        error(exc)
+        return 3
     except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
         error(exc)
         return 1

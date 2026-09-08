@@ -128,8 +128,9 @@ class SchemaV4Tests(unittest.TestCase):
 
             connection.set_authorizer(authorize)
             with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("source read")):
-                database.initialize()
+                schema_v4.migrate(connection)
             connection.set_authorizer(None)
+            database.initialize()
             self.assertEqual(database.status()["schema_version"], SCHEMA_VERSION)
             self.assertEqual(
                 [

@@ -17,7 +17,7 @@
 The default database is `data/db/syz_sage.sqlite3` in the owning checkout.
 An explicit `--database` or data-root override can select another location;
 see [path configuration](usage.md#paths-and-write-boundaries).
-Schema version 6 keeps titles, diagnostic types,
+Schema version 7 keeps titles, diagnostic types, failure patterns, access modes,
 subsystem tags, crash sites, complete extracted stacks, and fix sites queryable.
 The original downloaded JSON, reports, and patches remain in `blobs`.
 
@@ -25,6 +25,9 @@ The original downloaded JSON, reports, and patches remain in `blobs`.
 |---|---|---|
 | Bug title and identity | `bugs`, `bug_versions`, `snapshot_bugs` | `key`, `title`, version and snapshot IDs |
 | Bug diagnostic type | `snapshot_bugs` | `bug_type`, also exposed by `current_bug_rows` |
+| Failure/access interpretation | `snapshot_bug_characteristics` | `family`, `access_mode`, `evidence_json`, `classifier_version`; cached C reproducer metadata supports filtering |
+| Patch completeness | `patch_metric_coverage` | `patch_version_id`, `is_complete`; cached checks of the retained diff prevent incomplete patches from supplying size estimates |
+| Complete fix-size metrics | `current_bug_patch_metrics` | `has_patch`, `fix_file_count`, `patch_line_count`; unknown/incomplete sizes remain NULL |
 | Bug URLs | `bugs`, `snapshot_bugs` | `bug_url` (syzbot web page), `json_url` (JSON endpoint); also exposed by `current_bug_rows` |
 | Subsystem tags | `bug_subsystems` | `snapshot_id`, `bug_id`, `tag`, `source_blob_sha256` |
 | C reproducer links per crash | `crashes` | `bug_version_id`, `ordinal`, `c_reproducer_url`; bug-level availability is derived from the retained detail JSON |
@@ -63,6 +66,7 @@ establish a relationship between a report, patch, and bug.
 | `bugs.key` | `raw/upstream_fixed.json`, `Bugs[].link` | `/bug?extid=X` becomes `extid-X`; `/bug?id=X` becomes `id-X`. |
 | Active `title` in `current_bug_rows` / `ss show` | Listing `Bugs[].title`, normally carried through `processed/catalog.json`, `bugs[].title` | Import uses the catalog when available; otherwise it builds records from the listing. A missing record title falls back to the detail JSON title, then the bug key. |
 | `snapshot_bugs.bug_type` / active `bug_type` | The corresponding stored `snapshot_bugs.title` | Classify its leading diagnostic marker with `bug_types.classify_bug_type`; store the normalized lowercase result. No crash-report parsing or additional retrieval is used. |
+| `family`, `access_mode`, `characteristics` | Displayed title and the saved representative report | Conservative explicit diagnostic/access wording from the manifestation section, falling back to the title. Store source SHA-256, method, and evidence; missing/conflicting evidence remains unknown. |
 | `bug_versions.title`, `bugs.syzbot_id` | `raw/bugs/KEY.json`, top-level `title` and `id` | Copied from the detail response. Its internal `id` can differ from the `extid` used in the filename and URL. |
 | `bug_url`, `json_url` | Listing `Bugs[].link`, normally carried through the catalog's `bug_url` and `json_url` | The dashboard origin is added to relative links; `json=1` selects the JSON endpoint. These URLs are not taken from the detail JSON's internal `id`. |
 | `status`, `first_crash_at`, `last_crash_at`, `fix_time`, `close_time` | `raw/bugs/KEY.json`: `status`, `first-crash`, `last-crash`, `fix-time`, `close-time` | Copied from the named JSON fields. |
@@ -135,11 +139,12 @@ Subsystem tags remain separate and flat. An `fs` filter matches the stored
 The raw source is `crashes[].c-reproducer` in `raw/bugs/KEY.json`, retained for
 the indexed version through `bug_versions.raw_sha256` → `blobs`. Relative
 links are expanded using the bug's dashboard URL. The existing
-`crashes.c_reproducer_url` column keeps the URL for each crash; the bug-level
-summary does not need a duplicate status column.
+`crashes.c_reproducer_url` column keeps the URL for each crash. Schema 7 caches
+the bug-level status and URL list in `snapshot_bug_characteristics` to support
+availability filtering and batch statistics without repeatedly decoding detail blobs.
 
-`Database.get_bug()` and the listing/filter query rows derive two fields from
-the active version's saved detail blob. They are exposed in `ss show KEY --json`
+`Database.get_bug()` and the listing/filter query rows expose two fields derived
+from the active version's saved detail blob. They are exposed in `ss show KEY --json`
 and each bug in `ss filter --json` (also `ss list --json`):
 
 | Field | Derivation |
@@ -157,8 +162,9 @@ proof of availability.
 
 This is availability **reported by saved metadata**, independent of which
 representative report was retained. No reproducer contents are fetched or
-checked for local existence, and no HTTP request verifies the URLs. Existing
-indexed data needs no migration or re-import for the summary. The
+checked for local existence by these read commands, and no HTTP request verifies
+the URLs. Schema 7 backfills the cache from stored bytes during `ss migrate`.
+Explicit `ss fetch` reports local download results separately. The
 [CLI guide](usage.md#c-reproducer-availability) describes its display.
 
 ### Following a value back to its stored source
@@ -168,6 +174,7 @@ indexed data needs no migration or re-import for the summary. The
 | Original listing JSON/HTML | `snapshots.listing_json_sha256` / `listing_html_sha256` → `blobs.sha256` |
 | Detail JSON version | `bug_versions.raw_sha256` → `blobs.sha256`; check `payload_kind` |
 | Bug type | `snapshot_bugs.bug_type` derives from that same row's `title`; `listing_record_sha256` identifies the retained source record, with title fallback described above |
+| Failure family/access | `snapshot_bug_characteristics.evidence_json` identifies method, source, evidence text, and `source_sha256` for the matching title record or representative report |
 | Subsystem tag | `bug_subsystems.source_blob_sha256` → the listing HTML in `blobs` |
 | Crash location or stack frame | `report_version_id` → `report_versions.blob_sha256` → `blobs` |
 | Kernel build associated with a crash location | `crash_locations.crash_id` → `crashes`; `crashes.raw_sha256` identifies the serialized crash object |
@@ -318,6 +325,13 @@ ss show extid-0a0e5f37746013dc7476 --json
 ```
 
 ## Migration and subsequent updates
+
+Schema 7 adds conservative failure/access classifications, cached reproducer
+availability, and patch-coverage metadata for size filters. New ingestion derives
+these inside its existing transaction. Offline migration backfills from stored
+source bytes; original blobs and artifact associations remain intact. Classifier
+version 1 is independent of report parser revision 4 and patch parser revision 2.
+The [analysis guide](analysis.md) defines filtering, statistics, and interpretation rules.
 
 Migrations use stored rows and blobs, so no redownload or filesystem mirror is required.
 The v1-to-v2 migration backfills subsystem tags and location tables. The

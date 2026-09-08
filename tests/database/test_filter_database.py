@@ -422,7 +422,10 @@ class FilterDatabaseTests(unittest.TestCase):
         with Database(self.path) as database:
             self.assertEqual(database.filter_bugs()["total"], 0)
             self.assertEqual(database.filter_bugs()["bugs"], [])
-            self.assertEqual(database.filter_values(), {"bug_types": [], "subsystems": []})
+            self.assertEqual(
+                database.filter_values(),
+                {"bug_types": [], "subsystems": [], "families": [], "access_modes": []},
+            )
 
 
 if __name__ == "__main__":

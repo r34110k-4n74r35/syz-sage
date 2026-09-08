@@ -10,11 +10,12 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ..parsing.bug_types import BUG_TYPES
+from ..parsing.characteristics import ACCESS_MODES, BUG_FAMILIES
 from ..project.progress_events import progress_items, report_progress
 from ..retrieval.resolutions import (
     ResolutionTargets,
 )
-from . import location_store, schema_v3, schema_v4
+from . import characteristics, location_store, schema_v3, schema_v4, schema_v7
 from .records import _c_reproducer_fields, _dashboard_from_bug_url, _patch_urls, _text
 from .schema import SCHEMA_VERSION
 
@@ -189,10 +190,15 @@ def _effective_fixes(
     return database._merge_fix_rows([dict(row) for row in rows])
 
 
-def _current_effective_fixes(database: Database) -> dict[int, list[dict[str, Any]]]:
+def _current_effective_fixes(
+    database: Database, bug_ids: Sequence[int] | None = None
+) -> dict[int, list[dict[str, Any]]]:
     grouped: dict[int, list[dict[str, Any]]] = {}
+    where = (
+        "WHERE c.bug_id IN (" + ",".join("?" for _ in bug_ids) + ")" if bug_ids is not None else ""
+    )
     listing_rows = database.connection.execute(
-        """
+        f"""
         SELECT c.bug_id, 'listing' AS source_kind, f.ordinal, f.title,
                f.normalized_title, f.repo, f.branch, f.link,
                f.reported_hash, f.resolved_hash, f.author_email,
@@ -207,11 +213,12 @@ def _current_effective_fixes(database: Database) -> dict[int, list[dict[str, Any
          AND sp.commit_hash = COALESCE(f.reported_hash, f.resolved_hash)
         LEFT JOIN patch_versions AS pv
           ON pv.id = sp.patch_version_id AND pv.is_valid = 1
-        ORDER BY c.position, f.ordinal
-        """
+        {where} ORDER BY c.position, f.ordinal
+        """,
+        list(bug_ids or ()),
     ).fetchall()
     detail_rows = database.connection.execute(
-        """
+        f"""
         SELECT c.bug_id, 'bug-json' AS source_kind, f.ordinal, f.title,
                f.normalized_title, f.repo, f.branch, f.link,
                f.reported_hash, f.resolved_hash, f.author_email,
@@ -225,8 +232,9 @@ def _current_effective_fixes(database: Database) -> dict[int, list[dict[str, Any
          AND sp.commit_hash = COALESCE(f.reported_hash, f.resolved_hash)
         LEFT JOIN patch_versions AS pv
           ON pv.id = sp.patch_version_id AND pv.is_valid = 1
-        ORDER BY c.position, f.ordinal
-        """
+        {where} ORDER BY c.position, f.ordinal
+        """,
+        list(bug_ids or ()),
     ).fetchall()
     for row in (*listing_rows, *detail_rows):
         item = dict(row)
@@ -282,6 +290,7 @@ def _status(database: Database) -> dict[str, Any]:
         "fix_locations",
         "snapshot_reports",
         "snapshot_patches",
+        "snapshot_bug_characteristics",
     ):
         table_counts[table] = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
     current_bugs = int(connection.execute("SELECT COUNT(*) FROM current_bug_rows").fetchone()[0])
@@ -392,6 +401,17 @@ def filter_bugs(
     *,
     bug_types: Sequence[str] = (),
     subsystems: Sequence[str] = (),
+    families: Sequence[str] = (),
+    access_modes: Sequence[str] = (),
+    crash_files: Sequence[str] = (),
+    fix_files: Sequence[str] = (),
+    crash_functions: Sequence[str] = (),
+    fix_functions: Sequence[str] = (),
+    has_c_repro: bool | None = None,
+    has_report: bool | None = None,
+    has_patch: bool | None = None,
+    max_fix_files: int | None = None,
+    max_patch_lines: int | None = None,
     query: str | None = None,
     limit: int | None = 20,
     offset: int = 0,
@@ -404,6 +424,22 @@ def filter_bugs(
     """
     types = database._filter_terms(bug_types, "bug type")
     tags = database._filter_terms(subsystems, "subsystem")
+    family_terms = database._filter_terms(families, "failure family")
+    access_terms = database._filter_terms(access_modes, "access mode")
+    for values, allowed, label in (
+        (family_terms, BUG_FAMILIES, "failure family"),
+        (access_terms, ACCESS_MODES, "access mode"),
+    ):
+        if any(value not in allowed for value in values):
+            raise ValueError(
+                f"unknown {label}: " + ", ".join(value for value in values if value not in allowed)
+            )
+    for value in (has_c_repro, has_report, has_patch):
+        if value is not None and type(value) is not bool:
+            raise ValueError("availability filters must be booleans or None")
+    for value in (max_fix_files, max_patch_lines):
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError("patch size limits must be non-negative integers")
     unknown = [value for value in types if value not in BUG_TYPES]
     if unknown:
         raise ValueError("unknown bug type: " + ", ".join(unknown))
@@ -414,6 +450,48 @@ def filter_bugs(
     database.initialize()
     conditions: list[str] = []
     parameters: list[Any] = []
+    for values, column in ((family_terms, "ch.family"), (access_terms, "ch.access_mode")):
+        if values:
+            conditions.append(f"{column} IN ({','.join('?' for _ in values)})")
+            parameters.extend(values)
+    for values, view, columns, label in (
+        (crash_files, "current_crash_locations", ("file_path",), "crash file"),
+        (fix_files, "current_fix_locations", ("old_file_path", "new_file_path"), "fix file"),
+        (crash_functions, "current_crash_locations", ("function_name",), "crash function"),
+        (fix_functions, "current_fix_locations", ("function_name",), "fix function"),
+    ):
+        patterns = _source_patterns(values, label)
+        if patterns:
+            alternatives = []
+            for pattern in patterns:
+                for column in columns:
+                    alternatives.append(f"source_glob(?, loc.{column})")
+                    parameters.append(pattern)
+            conditions.append(
+                f"EXISTS(SELECT 1 FROM {view} loc WHERE loc.bug_id=c.bug_id AND ("
+                + " OR ".join(alternatives)
+                + "))"
+            )
+    if has_c_repro is not None:
+        conditions.append("ch.c_reproducer_status=?")
+        parameters.append("available" if has_c_repro else "not_provided")
+    if has_report is not None:
+        conditions.append(
+            "EXISTS(SELECT 1 FROM snapshot_reports sr JOIN report_versions rv "
+            "ON rv.id=sr.report_version_id AND rv.is_valid=1 "
+            "WHERE sr.snapshot_id=c.snapshot_id AND sr.bug_id=c.bug_id)=?"
+        )
+        parameters.append(int(has_report))
+    if has_patch is not None:
+        conditions.append("pm.has_patch=?")
+        parameters.append(int(has_patch))
+    for value, column in (
+        (max_fix_files, "pm.fix_file_count"),
+        (max_patch_lines, "pm.patch_line_count"),
+    ):
+        if value is not None:
+            conditions.append(f"{column}<=?")
+            parameters.append(value)
     if types:
         placeholders = ", ".join("?" for _ in types)
         conditions.append(f"c.bug_type IN ({placeholders})")
@@ -436,7 +514,11 @@ def filter_bugs(
     with database._read_transaction():
         total = int(
             database.connection.execute(
-                f"SELECT COUNT(*) FROM current_bug_rows AS c {where}", parameters
+                f"SELECT COUNT(*) FROM current_bug_rows AS c "
+                "JOIN snapshot_bug_characteristics ch "
+                "ON ch.snapshot_id=c.snapshot_id AND ch.bug_id=c.bug_id "
+                f"JOIN current_bug_patch_metrics pm ON pm.bug_id=c.bug_id {where}",
+                parameters,
             ).fetchone()[0]
         )
         return {
@@ -446,7 +528,34 @@ def filter_bugs(
             "offset": offset,
             "bug_types": types,
             "subsystems": tags,
+            "families": family_terms,
+            "access_modes": access_terms,
+            "crash_files": list(crash_files),
+            "fix_files": list(fix_files),
+            "crash_functions": list(crash_functions),
+            "fix_functions": list(fix_functions),
+            "has_c_repro": has_c_repro,
+            "has_report": has_report,
+            "has_patch": has_patch,
+            "max_fix_files": max_fix_files,
+            "max_patch_lines": max_patch_lines,
         }
+
+
+def _source_patterns(values: Sequence[str], label: str) -> list[str]:
+    if isinstance(values, (str, bytes)):
+        raise ValueError(f"{label} patterns must be a sequence of strings")
+    result = []
+    for value in values:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in value)
+        ):
+            raise ValueError(f"invalid {label} pattern: {value!r}")
+        if value not in result:
+            result.append(value)
+    return result
 
 
 def filter_values(database: Database) -> dict[str, list[dict[str, Any]]]:
@@ -468,7 +577,18 @@ def filter_values(database: Database) -> dict[str, list[dict[str, Any]]]:
                 "ORDER BY tag COLLATE NOCASE"
             )
         ]
-        return {"bug_types": types, "subsystems": tags}
+        result = {"bug_types": types, "subsystems": tags}
+        for key, column in (("families", "family"), ("access_modes", "access_mode")):
+            result[key] = [
+                dict(row)
+                for row in database.connection.execute(
+                    f"SELECT ch.{column} AS value,COUNT(*) AS count FROM current_bug_rows c "
+                    "JOIN snapshot_bug_characteristics ch "
+                    "ON ch.snapshot_id=c.snapshot_id AND ch.bug_id=c.bug_id "
+                    f"GROUP BY ch.{column} ORDER BY ch.{column}"
+                )
+            ]
+        return result
 
 
 def _list_filtered_rows(
@@ -485,6 +605,9 @@ def _list_filtered_rows(
             c.bug_id, c.bug_version_id, c.snapshot_id,
             c.key, c.title, c.bug_type, c.status, c.bug_url,
             c.raw_sha256, bv.payload_kind,
+            ch.family,ch.access_mode,ch.evidence_json,
+            ch.c_reproducer_status,ch.c_reproducer_urls_json,
+            pm.has_patch,pm.fix_file_count,pm.patch_line_count,
             c.first_crash_at, c.last_crash_at, c.fix_time, c.close_time,
             (SELECT COUNT(*) FROM crashes AS cr
              WHERE cr.bug_version_id = c.bug_version_id) AS crash_count,
@@ -496,6 +619,8 @@ def _list_filtered_rows(
             ) AS has_report
         FROM current_bug_rows AS c
         JOIN bug_versions AS bv ON bv.id = c.bug_version_id
+        JOIN snapshot_bug_characteristics ch ON ch.snapshot_id=c.snapshot_id AND ch.bug_id=c.bug_id
+        JOIN current_bug_patch_metrics pm ON pm.bug_id=c.bug_id
         {where}
         ORDER BY c.position
         LIMIT ? OFFSET ?
@@ -503,33 +628,64 @@ def _list_filtered_rows(
         parameters,
     ).fetchall()
     result: list[dict[str, Any]] = []
+    batch_fixes: dict[int, list[dict[str, Any]]] = {}
+    batch_tags: dict[int, list[str]] = {}
+    if len(rows) > 1:
+        ids = [int(row["bug_id"]) for row in rows]
+        for start in range(0, len(ids), 500):
+            selected = ids[start : start + 500]
+            batch_fixes.update(_current_effective_fixes(database, selected))
+            for tag in database.connection.execute(
+                "SELECT bug_id,tag FROM current_bug_subsystems WHERE bug_id IN ("
+                + ",".join("?" for _ in selected)
+                + ") ORDER BY tag",
+                selected,
+            ):
+                batch_tags.setdefault(int(tag[0]), []).append(tag[1])
     for row in rows:
         item = dict(row)
+        item.update(characteristics.fields(item))
+        item.pop("evidence_json")
+        item["has_patch"] = bool(item["has_patch"])
         bug_id = int(item.pop("bug_id"))
         version_id = int(item.pop("bug_version_id"))
         snapshot_id = int(item.pop("snapshot_id"))
-        fixes = database._effective_fixes(
-            bug_id=bug_id,
-            version_id=version_id,
-            snapshot_id=snapshot_id,
+        fixes = (
+            batch_fixes.get(bug_id, [])
+            if len(rows) > 1
+            else database._effective_fixes(
+                bug_id=bug_id,
+                version_id=version_id,
+                snapshot_id=snapshot_id,
+            )
         )
         item["fix_count"] = len(fixes)
         item["patch_urls"] = _patch_urls(fixes)
-        item.update(
-            _c_reproducer_fields(
-                database._load_json_blob(item.pop("raw_sha256")),
-                item.pop("payload_kind"),
-                _dashboard_from_bug_url(item["bug_url"]),
+        repro_urls = item.pop("c_reproducer_urls_json")
+        if len(rows) > 1:
+            item["c_reproducer_urls"] = json.loads(repro_urls)
+            item.pop("raw_sha256")
+            item.pop("payload_kind")
+        else:
+            item.update(
+                _c_reproducer_fields(
+                    database._load_json_blob(item.pop("raw_sha256")),
+                    item.pop("payload_kind"),
+                    _dashboard_from_bug_url(item["bug_url"]),
+                )
             )
-        )
         item["has_report"] = bool(item["has_report"])
-        item["subsystems"] = [
-            tag[0]
-            for tag in database.connection.execute(
-                "SELECT tag FROM current_bug_subsystems WHERE bug_id = ? ORDER BY tag",
-                (bug_id,),
-            )
-        ]
+        item["subsystems"] = (
+            batch_tags.get(bug_id, [])
+            if len(rows) > 1
+            else [
+                tag[0]
+                for tag in database.connection.execute(
+                    "SELECT tag FROM current_bug_subsystems WHERE bug_id = ? ORDER BY tag",
+                    (bug_id,),
+                )
+            ]
+        )
         result.append(item)
     return result
 
@@ -544,6 +700,46 @@ def _load_json_blob(database: Database, digest: str) -> Any:
         except (UnicodeDecodeError, json.JSONDecodeError):
             pass
     return None
+
+
+def research_rows(database: Database, **criteria: Any) -> list[dict[str, Any]]:
+    """Select active bugs with lightweight fix/location evidence in bounded batches."""
+    criteria.setdefault("limit", None)
+    database.initialize()
+    with database._read_transaction():
+        rows = database.filter_bugs(**criteria)["bugs"]
+        if not rows:
+            return []
+        by_key = {row["key"]: row for row in rows}
+        keys = list(by_key)
+        for start in range(0, len(keys), 500):
+            selected = keys[start : start + 500]
+            placeholders = ",".join("?" for _ in selected)
+            ids = {
+                int(row["bug_id"]): row["key"]
+                for row in database.connection.execute(
+                    f"SELECT bug_id,key FROM current_bug_rows WHERE key IN ({placeholders})",
+                    selected,
+                )
+            }
+            fixes = _current_effective_fixes(database, list(ids))
+            for bug_id, key in ids.items():
+                by_key[key]["fixes"] = fixes.get(bug_id, [])
+                by_key[key]["crash_locations"] = []
+                by_key[key]["fix_locations"] = []
+            for field, view, order in (
+                ("crash_locations", "current_crash_locations", "ordinal"),
+                ("fix_locations", "current_fix_locations", "commit_hash,repo,ordinal"),
+            ):
+                for raw in database.connection.execute(
+                    f"SELECT * FROM {view} WHERE key IN ({placeholders}) ORDER BY {order}", selected
+                ):
+                    item = dict(raw)
+                    key = item.pop("key")
+                    item.pop("title", None)
+                    item.pop("bug_id", None)
+                    by_key[key][field].append(item)
+        return rows
 
 
 def get_bug(database: Database, key: str) -> dict[str, Any] | None:
@@ -645,6 +841,13 @@ def _get_bug(database: Database, key: str) -> dict[str, Any] | None:
             "text": decoded,
         }
     raw = database._load_json_blob(version_row["raw_sha256"])
+    classification = database.connection.execute(
+        "SELECT ch.*,pm.has_patch,pm.fix_file_count,pm.patch_line_count "
+        "FROM snapshot_bug_characteristics ch "
+        "JOIN current_bug_patch_metrics pm ON pm.bug_id=ch.bug_id "
+        "WHERE ch.snapshot_id=? AND ch.bug_id=?",
+        (snapshot_id, bug_id),
+    ).fetchone()
     return {
         "key": bug_row["key"],
         "syzbot_id": bug_row["syzbot_id"],
@@ -664,11 +867,16 @@ def _get_bug(database: Database, key: str) -> dict[str, Any] | None:
         "in_current_snapshot": True,
         "fixes": fixes,
         "fix_commits": fixes,
+        "patch_urls": _patch_urls(fixes),
         "cause_commit": dict(cause_row) if cause_row else None,
         "crashes": crashes,
         "discussions": discussions,
         "report": report,
         "raw": raw,
+        **(characteristics.fields(classification) if classification is not None else {}),
+        "has_patch": bool(classification["has_patch"]) if classification else False,
+        "fix_file_count": classification["fix_file_count"] if classification else None,
+        "patch_line_count": classification["patch_line_count"] if classification else None,
         **_c_reproducer_fields(
             raw, version_row["payload_kind"], _dashboard_from_bug_url(bug_row["bug_url"])
         ),
@@ -715,6 +923,7 @@ def _health_check(database: Database) -> dict[str, Any]:
     snapshot_errors.extend(schema_v3.consistency_errors(connection))
     report_progress(database._on_progress, "check-snapshots", "Checking bug classifications", 1, 3)
     snapshot_errors.extend(schema_v4.consistency_errors(connection))
+    snapshot_errors.extend(schema_v7.consistency_errors(connection))
     report_progress(database._on_progress, "check-snapshots", "Checking active membership", 2, 3)
     current_rows = connection.execute(
         "SELECT id, record_count FROM snapshots WHERE is_current = 1"
