@@ -31,6 +31,9 @@ dist/
 *.tmp
 .DS_Store
 
+# Local study and analysis
+/study/
+
 # Editor files
 .idea/
 .vscode/
