@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import asdict
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
 from ..parsing.patch import extract_fix_locations
+from .patch_metrics import complete_text
 
 if TYPE_CHECKING:
     from .repository import Database
@@ -91,16 +93,128 @@ def _patch_files(text: str) -> tuple[str, list[dict[str, Any]]]:
         locations = extract_fix_locations(block)
         first = locations[0] if locations else None
         kinds = {location.kind for location in locations}
+        complete = (
+            bool(first) and not kinds.intersection({"binary", "unparsed"}) and complete_text(block)
+        )
         files.append(
             {
                 "old_file_path": first.old_file_path if first else None,
                 "new_file_path": first.new_file_path if first else None,
                 "kind": "text" if "text" in kinds else first.kind if first else "unparsed",
+                "insertions": sum(location.new_count for location in locations)
+                if complete
+                else None,
+                "deletions": sum(location.old_count for location in locations)
+                if complete
+                else None,
                 "text": block,
                 "hunks": _hunks(block),
             }
         )
     return preamble, files
+
+
+def _diffstat(files: list[dict[str, Any]]) -> dict[str, Any]:
+    complete = bool(files) and all(
+        item["insertions"] is not None and item["deletions"] is not None for item in files
+    )
+    return {
+        "files_changed": len(files),
+        "insertions": sum(item["insertions"] for item in files) if complete else None,
+        "deletions": sum(item["deletions"] for item in files) if complete else None,
+        "complete": complete,
+    }
+
+
+def _bug_fixes(database: Database, key: str) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    bug = database.connection.execute(
+        """SELECT key, title, bug_url, bug_id, bug_version_id, snapshot_id
+           FROM current_bug_rows WHERE key = ?""",
+        (key,),
+    ).fetchone()
+    if bug is None:
+        return None
+    fixes = database._effective_fixes(
+        bug_id=bug["bug_id"],
+        version_id=bug["bug_version_id"],
+        snapshot_id=bug["snapshot_id"],
+    )
+    return dict(bug), fixes
+
+
+def _patch_value(
+    database: Database,
+    bug: Mapping[str, Any],
+    fix: dict[str, Any],
+    file_pattern: str | None = None,
+) -> dict[str, Any]:
+    commit_hash = fix["commit_hash"]
+    row = (
+        database.connection.execute(
+            """SELECT sp.source_url, pv.blob_sha256, b.content, b.size_bytes
+               FROM snapshot_patches sp JOIN patch_versions pv ON pv.id = sp.patch_version_id
+               JOIN blobs b ON b.sha256 = pv.blob_sha256
+               WHERE sp.snapshot_id = ? AND sp.commit_hash = ? AND pv.is_valid = 1""",
+            (bug["snapshot_id"], commit_hash),
+        ).fetchone()
+        if commit_hash
+        else None
+    )
+    text = bytes(row["content"]).decode("utf-8", errors="replace") if row else None
+    preamble, files = _patch_files(text) if text is not None else ("", [])
+    total_files = len(files)
+    if file_pattern is not None and text is not None:
+        files = [
+            item
+            for item in files
+            if any(
+                path and fnmatchcase(path, file_pattern)
+                for path in (item["old_file_path"], item["new_file_path"])
+            )
+        ]
+        if not files:
+            raise ValueError(f"no saved patch file matches {file_pattern!r}")
+        text = preamble + "".join(item["text"] for item in files)
+    return {
+        "key": bug["key"],
+        "title": bug["title"],
+        "bug_url": bug["bug_url"],
+        "commit_hash": commit_hash,
+        "fix": fix,
+        "available": row is not None,
+        "source_url": row["source_url"] if row else fix.get("link") or None,
+        "sha256": row["blob_sha256"] if row else None,
+        "size": row["size_bytes"] if row else 0,
+        "file_pattern": file_pattern,
+        "files": files,
+        "total_files": total_files,
+        "diffstat": _diffstat(files) if row else None,
+        "text": text,
+    }
+
+
+def patch_views(database: Database, key: str) -> list[dict[str, Any]] | None:
+    """Return each effective fix's saved patch in active listing order.
+
+    Title-only fixes and commits without retained valid bytes remain explicit
+    unavailable entries. All reads share one snapshot and never use mirror files.
+    """
+    database.initialize()
+    with database._read_transaction():
+        selected = _bug_fixes(database, key)
+        if selected is None:
+            return None
+        bug, fixes = selected
+        seen: set[str] = set()
+        patches = []
+        for fix in fixes:
+            commit_hash = fix["commit_hash"]
+            if commit_hash:
+                if commit_hash in seen:
+                    continue
+                seen.add(commit_hash)
+            patches.append(_patch_value(database, bug, fix))
+        return patches
 
 
 def patch_view(
@@ -125,55 +239,11 @@ def patch_view(
             raise ValueError("--file requires a nonempty source path or glob without controls")
     database.initialize()
     with database._read_transaction():
-        bug = database.connection.execute(
-            """SELECT key, title, bug_url, bug_id, bug_version_id, snapshot_id
-               FROM current_bug_rows WHERE key = ?""",
-            (key,),
-        ).fetchone()
-        if bug is None:
+        selected = _bug_fixes(database, key)
+        if selected is None:
             return None
-        fixes = database._effective_fixes(
-            bug_id=bug["bug_id"],
-            version_id=bug["bug_version_id"],
-            snapshot_id=bug["snapshot_id"],
-        )
+        bug, fixes = selected
         fix = next((item for item in fixes if item["commit_hash"] == commit_hash), None)
         if fix is None:
             raise ValueError(f"commit {commit_hash} is not a recorded fix for {key}")
-        row = database.connection.execute(
-            """SELECT sp.source_url, pv.blob_sha256, b.content, b.size_bytes
-               FROM snapshot_patches sp JOIN patch_versions pv ON pv.id = sp.patch_version_id
-               JOIN blobs b ON b.sha256 = pv.blob_sha256
-               WHERE sp.snapshot_id = ? AND sp.commit_hash = ? AND pv.is_valid = 1""",
-            (bug["snapshot_id"], commit_hash),
-        ).fetchone()
-        text = bytes(row["content"]).decode("utf-8", errors="replace") if row else None
-        preamble, files = _patch_files(text) if text is not None else ("", [])
-        total_files = len(files)
-        if file_pattern is not None and text is not None:
-            files = [
-                item
-                for item in files
-                if any(
-                    path and fnmatchcase(path, file_pattern)
-                    for path in (item["old_file_path"], item["new_file_path"])
-                )
-            ]
-            if not files:
-                raise ValueError(f"no saved patch file matches {file_pattern!r}")
-            text = preamble + "".join(item["text"] for item in files)
-        return {
-            "key": bug["key"],
-            "title": bug["title"],
-            "bug_url": bug["bug_url"],
-            "commit_hash": commit_hash,
-            "fix": fix,
-            "available": row is not None,
-            "source_url": row["source_url"] if row else fix.get("link") or None,
-            "sha256": row["blob_sha256"] if row else None,
-            "size": row["size_bytes"] if row else 0,
-            "file_pattern": file_pattern,
-            "files": files,
-            "total_files": total_files,
-            "text": text,
-        }
+        return _patch_value(database, bug, fix, file_pattern)

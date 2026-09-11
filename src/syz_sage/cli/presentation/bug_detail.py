@@ -1,4 +1,4 @@
-"""Detailed bug, crash stack, report, and fix-location presentation."""
+"""Detailed bug, crash stack, and fix-location presentation."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from ..terminal import paragraph, safe_text, section, style
+from ..terminal import paragraph, section, style
 from .common import bug_type_label, c_reproducer_label, fields, format_date, title_colors
 from .locations import render_crash_locations, render_fixes
 
@@ -27,7 +27,7 @@ def _stack_colors(line: str) -> str:
     )
 
 
-def human_bug(bug: dict[str, Any], include_report: bool, include_stack: bool = False) -> None:
+def human_bug(bug: dict[str, Any], include_stack: bool = False) -> None:
     paragraph(bug.get("title", "Untitled bug"), highlight=title_colors)
     metadata: list[tuple[str, object]] = [
         ("Key", bug.get("key", "")),
@@ -124,11 +124,3 @@ def human_bug(bug: dict[str, Any], include_report: bool, include_stack: bool = F
             )
         if not stack:
             paragraph("No stack frames indexed.", indent=2, tone="muted")
-    if (
-        include_report
-        and available
-        and isinstance(report, Mapping)
-        and report.get("text") is not None
-    ):
-        section("Full representative report")
-        print(safe_text(report["text"], multiline=True))

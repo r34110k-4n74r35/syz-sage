@@ -46,21 +46,7 @@ class CliQueriesTests(CliFixture, unittest.TestCase):
         self.assertEqual(bug["fixes"][0]["hash"], "a" * 40)
         self.assertNotIn("text", bug["report"])
 
-        code, stdout, stderr = invoke(
-            [
-                "--database",
-                str(self.database),
-                "show",
-                "extid-alpha123",
-                "--report",
-                "--json",
-            ]
-        )
-        self.assertEqual(code, 0, stderr)
-        bug_with_report = json.loads(stdout)
-        self.assertIn("BUG: KASAN: use-after-free in alpha", bug_with_report["report"]["text"])
-
-    def test_human_show_report_displays_its_body_and_size(self) -> None:
+    def test_human_show_displays_report_metadata_without_its_body(self) -> None:
         self.import_fixture()
 
         code, stdout, stderr = invoke(
@@ -69,14 +55,14 @@ class CliQueriesTests(CliFixture, unittest.TestCase):
                 str(self.database),
                 "show",
                 "extid-alpha123",
-                "--report",
             ]
         )
 
         self.assertEqual(code, 0, stderr)
         self.assertIn("Representative report: available (", compact(stdout))
         self.assertNotIn("available (0 bytes)", stdout)
-        self.assertIn("BUG: KASAN: use-after-free in alpha", stdout)
+        self.assertNotIn("BUG: KASAN: use-after-free in alpha", stdout)
+        self.assertNotIn("Full representative report", stdout)
 
     def test_show_accepts_a_syzbot_url_for_the_same_local_bug(self) -> None:
         self.import_fixture()

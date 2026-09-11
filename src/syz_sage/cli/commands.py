@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from ..analysis.evidence import build_explanation
 from ..database import Database
-from ..database.evidence import patch_view
+from ..database.evidence import patch_view, patch_views
 from ..database.research import compare_bugs, related_bugs, statistics
 from ..parsing.listing import KEY_RE, MAX_BUG_KEY_LENGTH, absolute_syzbot_url, key_from_link
 from ..project.config import DATA_DIR_ENV, DATABASE_ENV, DataPaths
@@ -48,7 +48,7 @@ from .display import (
 from .display import (
     human_update as _human_update,
 )
-from .presentation.evidence import human_explanation, human_patch
+from .presentation.evidence import human_explanation, human_patch, human_patches
 from .presentation.research import human_compare, human_fetch, human_related, human_statistics
 from .progress import ProgressDisplay
 from .research_arguments import selection, validate_research_filters
@@ -292,17 +292,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                         bug["explanation"] = build_explanation(bug)
                     if args.patch:
                         bug["patch"] = patch_view(database, key, args.patch, args.patch_file)
-                if not args.report and bug.get("report"):
+                    if args.diff:
+                        bug["patches"] = patch_views(database, key) or []
+                if bug.get("report"):
                     bug["report"].pop("text", None)
                 if args.json:
                     _dump(bug)
                 else:
-                    if not (args.explain or args.patch) or args.report or args.stack:
-                        _human_bug(bug, args.report, args.stack)
+                    if not (args.explain or args.patch) or args.stack or args.diff:
+                        _human_bug(bug, include_stack=args.stack)
                     if args.explain:
                         human_explanation(bug["explanation"])
                     if args.patch:
                         human_patch(bug["patch"])
+                    if args.diff:
+                        human_patches(bug["patches"])
                 return 0
     except KeyboardInterrupt:
         error("Interrupted.")

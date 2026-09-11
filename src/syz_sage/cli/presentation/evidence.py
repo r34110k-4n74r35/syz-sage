@@ -2,36 +2,111 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ..terminal import paragraph, safe_text, section, style
+from ..terminal import paragraph, safe_text, section, style, terminal_width
 from .common import fields, title_colors
 
 
-def human_patch(value: Mapping[str, Any]) -> None:
-    section("Saved patch")
-    paragraph(value.get("fix", {}).get("title") or "Untitled fix", highlight=title_colors)
-    metadata: list[tuple[str, object]] = [
-        ("Key", value.get("key") or "unknown"),
-        ("Commit", value.get("commit_hash") or "unresolved"),
-        ("Patch", "available" if value.get("available") else "not recorded"),
-    ]
-    if value.get("source_url"):
-        metadata.append(("URL", value["source_url"]))
-    if value.get("available"):
-        count = len(value.get("files") or [])
-        metadata.extend(
-            [
-                ("Files", f"{count} selected / {value.get('total_files', count)} total"),
-                ("Stored bytes", value.get("size", 0)),
-                ("SHA-256", value.get("sha256") or "unknown"),
-            ]
-        )
-    fields(metadata)
-    if not value.get("available"):
-        paragraph("No retained patch text is available for this fix.", indent=2, tone="warning")
+def _diffstat(value: Mapping[str, Any]) -> None:
+    stats = value.get("diffstat")
+    if not isinstance(stats, Mapping):
         return
+    section("Diffstat")
+    rows: list[tuple[str, str, str]] = []
+    for file in value.get("files") or []:
+        old, new = file.get("old_file_path"), file.get("new_file_path")
+        path = (
+            f"{old} -> {new}" if old and new and old != new else str(new or old or "unknown file")
+        )
+        if old and not new:
+            path += " (deleted)"
+        elif new and not old:
+            path += " (new)"
+        inserted, deleted = file.get("insertions"), file.get("deletions")
+        if inserted is None or deleted is None:
+            counts = (
+                "binary (line counts unknown)"
+                if file.get("kind") == "binary"
+                else "unknown (incomplete or unparsed diff)"
+            )
+            rendered = style(counts, tone="warning")
+        else:
+            counts = f"+{inserted:,} -{deleted:,}"
+            rendered = (
+                style(f"+{inserted:,}", tone="success") + " " + style(f"-{deleted:,}", tone="error")
+            )
+            if inserted == deleted == 0:
+                counts += " (no text changes)"
+                rendered += style(" (no text changes)", tone="muted")
+        rows.append((safe_text(path), counts, rendered))
+    path_width = max((len(path) for path, _, _ in rows), default=0)
+    aligned = all(path_width + len(counts) + 5 <= terminal_width() for _, counts, _ in rows)
+    for path, _, rendered in rows:
+        if aligned:
+            print("  " + style(path.ljust(path_width), tone="accent") + " | " + rendered)
+        else:
+            paragraph(path, indent=2, tone="accent")
+            print("    " + rendered)
+    total = stats["files_changed"]
+    files_label = "file" if total == 1 else "files"
+    if stats.get("complete"):
+        inserted, deleted = stats["insertions"], stats["deletions"]
+        insertion_label = "insertion" if inserted == 1 else "insertions"
+        deletion_label = "deletion" if deleted == 1 else "deletions"
+        paragraph(
+            f"{total:,} {files_label} changed, {inserted:,} {insertion_label}(+), "
+            f"{deleted:,} {deletion_label}(-).",
+            indent=2,
+            tone="strong",
+        )
+    else:
+        paragraph(
+            f"{total:,} {files_label} identified; total line counts unknown "
+            "(binary, incomplete, or unparsed diff).",
+            indent=2,
+            tone="warning",
+        )
+
+
+def human_patches(values: Sequence[Mapping[str, Any]]) -> None:
+    if not values:
+        paragraph("No fix references are recorded for this bug.", indent=2, tone="muted")
+    for value in values:
+        human_patch(value, include_metadata=False)
+
+
+def human_patch(value: Mapping[str, Any], *, include_metadata: bool = True) -> None:
+    if include_metadata:
+        section("Saved patch")
+        paragraph(value.get("fix", {}).get("title") or "Untitled fix", highlight=title_colors)
+        metadata: list[tuple[str, object]] = [
+            ("Key", value.get("key") or "unknown"),
+            ("Commit", value.get("commit_hash") or "unresolved"),
+            ("Patch", "available" if value.get("available") else "not recorded"),
+        ]
+        if value.get("source_url"):
+            metadata.append(("URL", value["source_url"]))
+        if value.get("available"):
+            count = len(value.get("files") or [])
+            metadata.extend(
+                [
+                    ("Files", f"{count} selected / {value.get('total_files', count)} total"),
+                    ("Stored bytes", value.get("size", 0)),
+                    ("SHA-256", value.get("sha256") or "unknown"),
+                ]
+            )
+        fields(metadata)
+    if not value.get("available"):
+        label = (
+            "this fix"
+            if include_metadata
+            else value.get("commit_hash") or value.get("fix", {}).get("title") or "this fix"
+        )
+        paragraph(f"No retained patch text is available for {label}.", indent=2, tone="warning")
+        return
+    _diffstat(value)
     section("Diff")
     # Do not wrap or truncate diff lines. JSON preserves the original bytes as
     # decoded text; the terminal view escapes control sequences before coloring.

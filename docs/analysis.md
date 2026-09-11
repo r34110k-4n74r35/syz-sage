@@ -71,33 +71,52 @@ patches are missing, or their contents are binary or incompletely parsed. Those
 bugs do not pass maximum-size filters. Availability describes saved evidence,
 not whether additional content exists online.
 
-## Read a saved patch
+## Read saved patches
 
-Use `ss show KEY` to find its fix hashes, then select a commit:
+Append all saved fix patches to the bug details, or select one commit:
 
 ```console
+ss show KEY --diff
+ss show KEY --stack --diff
+ss show KEY --diff --json
 ss show KEY --patch HASH
 ss show KEY --patch HASH --file 'net/core/*'
 ss show KEY --patch HASH --json
 ```
 
 Replace `KEY` and `HASH` with an actual bug key and full 40-character commit hash.
-The hash must belong to that bug. Diff lines remain unwrapped; human output colors
-additions, deletions, file headers, and hunk headings. `--file` follows the same
-glob rules and matches either side of a rename. It requires `--patch`; an unmatched
+Use ordinary `ss show KEY` to find its fix hashes; a selected hash must belong to
+that bug. `--diff` includes per-file insertion/deletion summaries and full saved
+text for every fix. Diff lines remain unwrapped; human output colors additions,
+deletions, file headers, and hunk headings. Combine `--stack --diff` to read the
+full numbered stack and all patches together. `--explain` can also be included.
+
+`--diff` and `--patch HASH` are mutually exclusive. `--file` follows the same glob
+rules and matches either side of a rename. It requires `--patch`; an unmatched
 path is an error.
 
-JSON adds `patch` with commit metadata, source URL, SHA-256, file sections, hunks,
-and saved text. The hash/size describe the full retained patch even when displayed
-text is filtered. A known fix without saved bytes returns `available: false`;
-inspection does not trigger a download.
+Inspection reads retained patch bytes from the active SQLite snapshot, even when
+artifact files are missing, and never downloads patches. Unresolved fix references
+and missing patches are reported explicitly. Binary or incomplete patches have
+unknown line counts; their available text is still displayed.
+
+JSON `--diff` adds a `patches` array; `--patch HASH` adds a single `patch` object.
+Each entry includes commit metadata, source URL, SHA-256, file sections, hunks,
+and saved text. Its `diffstat` contains `files_changed`, `insertions`, `deletions`,
+and `complete`; file sections also include `insertions` and `deletions`. Unknown
+line counts are `null`, and `complete` is false when counts are incomplete.
+The hash/size describe the full retained patch even when displayed text is
+filtered; counts describe the selected files. A fix without saved bytes returns
+`available: false`, with `text` and `diffstat` set to `null`. Ordinary `show --json`
+omits patch bodies.
 
 ## Explain crash-to-fix relationships
 
 ```console
 ss show KEY --explain
 ss show KEY --explain --patch HASH
-ss show KEY --explain --report --json
+ss show KEY --stack --diff --explain
+ss show KEY --explain --json
 ```
 
 Explanations connect failure/access wording and crash coordinates to report evidence,
@@ -113,8 +132,8 @@ Crash and patch line numbers are not compared across different source revisions.
 These are observed relationships, not proof of causation. No external AI service
 or source-code execution is used.
 
-JSON adds `explanation` without the complete report unless `--report` is supplied.
-Normal `--stack` and `--report` views can be combined with these options.
+JSON adds `explanation`, keeps report metadata, and always omits full report text.
+Normal `--stack` and `--diff` views can be combined with `--explain`.
 
 ## Find related cases and compare bugs
 

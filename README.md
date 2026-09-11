@@ -48,7 +48,7 @@ ss update
 ss filter --type kasan --subsystem fs
 ss list --query use-after-free --limit 5
 ss show extid-0a884bc2d304ce4af70f
-ss show extid-0a884bc2d304ce4af70f --stack
+ss show extid-0a884bc2d304ce4af70f --stack --diff
 ss stats --type kasan --subsystem fs
 ss check
 ```
@@ -79,7 +79,8 @@ For a database created by an older version, run `ss migrate` once to backfill
 bug types and repair crash-stack interpretation from stored evidence. No download is needed.
 
 For deeper inspection, filter by failure pattern, access mode, source paths,
-functions, or evidence availability; read saved diffs with `ss show KEY --patch HASH`;
+functions, or evidence availability; read all saved fix diffs with `ss show KEY --diff`
+or select one with `ss show KEY --patch HASH`;
 and inspect per-hunk relationships with `ss show KEY --explain`. `ss related KEY`
 and `ss compare KEY1 KEY2` show concrete shared evidence. Explicit `ss fetch`
 downloads selected crash evidence without executing reproducers. See

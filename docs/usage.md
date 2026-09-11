@@ -47,7 +47,7 @@ command; command-specific options follow it.
 | `fetch KEY` | Download explicitly requested files for one saved crash. | Network as needed; writes optional artifact files, leaves SQLite unchanged. |
 
 See [finding and studying bugs](analysis.md) for failure/access/source filters,
-`show --patch` and `--explain`, related cases, comparisons, statistics, and selective
+`show --diff`, `--patch`, and `--explain`, related cases, comparisons, statistics, and selective
 downloads. These additions use schema 7; migrate an older database first.
 
 `show`, `list`, and `filter` use the **active complete snapshot**. Retained historical
@@ -85,18 +85,28 @@ remain unknown; inferred functions retain their extraction basis.
 
 ```console
 ss show extid-0a884bc2d304ce4af70f --stack
-ss show extid-0a884bc2d304ce4af70f --report
-ss show extid-0a884bc2d304ce4af70f --json --report
+ss show extid-0a884bc2d304ce4af70f --stack --diff
+ss show extid-0a884bc2d304ce4af70f --stack --diff --explain
+ss show extid-0a884bc2d304ce4af70f --json
 ```
 
 | Show option | Effect |
 |---|---|
 | `--stack` | Display every extracted frame from the representative report, including inline and allocation/free traces. |
-| `--report` | Include the complete saved representative report text. |
-| `--json` | Return structured metadata and the extracted stack; include the report body only with `--report`. |
+| `--json` | Return structured metadata, including report metadata and the extracted stack; omit full report text. Patch bodies require `--diff` or `--patch`. |
+| `--diff` | Append all saved fix patches, with per-file insertion/deletion summaries and complete diff text. |
 | `--patch HASH` | Display a saved fix diff selected by full commit hash. |
 | `--file PATTERN` | Select old/new paths within `--patch` using a case-sensitive glob. |
 | `--explain` | Show evidence and per-hunk crash-to-fix relationships. |
+
+`--diff` keeps the ordinary bug details and can be combined with `--stack`
+and `--explain`. Use `--stack --diff` for the full numbered stack
+followed by all saved fixes. Each added patch starts at **Diffstat**, followed by
+**Diff**, without repeating its metadata. `--diff` and `--patch` are mutually
+exclusive; `--file` requires `--patch`. Patch inspection reads retained SQLite content
+offline, even when artifact files are missing. Unresolved fixes and unavailable
+patches are reported explicitly; binary or incomplete patches keep their saved
+text with unknown line counts. See [patch inspection](analysis.md#read-saved-patches).
 
 Routine retrieval saves **one representative crash report per bug**, plus
 metadata for every crash entry supplied by syzbot. Kernel configs and C/syz
@@ -105,8 +115,10 @@ reports are not downloaded by `ss update`. See the
 [database guide](database.md) for coverage, location interpretation, and the
 mapping from source files to database fields.
 
-Use explicit `ss fetch KEY --c-repro --config` or `--report --crash N` when a study
-needs extra evidence; see [selective downloads](analysis.md#fetch-additional-evidence-for-one-crash).
+Saved representative report files remain under `artifacts/reports/KEY.txt`
+beneath the selected data root. Use explicit `ss fetch KEY --c-repro --config`
+or `ss fetch KEY --report --crash N` when a study needs extra evidence; see
+[selective downloads](analysis.md#fetch-additional-evidence-for-one-crash).
 
 ### C reproducer availability
 
@@ -181,9 +193,9 @@ The human display groups each result into readable sections:
 
 Source locations use the same formatting and interpretation as `ss show`.
 The stack count describes the representative report; the crash count covers all
-saved crash entries. Full report text and stacks remain available through
-`ss show KEY --report --stack`. No sections or source ranges are truncated;
-use `--limit 5` to browse a smaller page.
+saved crash entries. Use `ss show KEY --stack` for all indexed frames and the
+[saved report files or explicit fetch](#inspect-bugs) for raw report text.
+No sections or source ranges are truncated; use `--limit 5` to browse a smaller page.
 
 All distinct recorded patch links and C reproducer URLs remain visible in full
 for copying. A patch URL already printed under its fix is not repeated in the
@@ -439,12 +451,17 @@ ss import-legacy ./data --quiet
 ss migrate --quiet
 ss check --json
 ss status --json
-ss show extid-0a884bc2d304ce4af70f --json --report
+ss show extid-0a884bc2d304ce4af70f --json
 ss filter --type kasan --subsystem fs --all --json
 ```
 
-JSON `show` includes `crash_stack` without `--stack`; only `--report` adds the
-report body. JSON preserves source strings and field values independently of
+JSON `show` includes report metadata and `crash_stack` without `--stack` and
+always omits full report text. `--diff` adds a `patches` array with metadata,
+text, file sections, and insertion/deletion summaries for every fix;
+`--patch HASH` adds the selected
+`patch` object. Ordinary JSON omits patch bodies. See the
+[patch JSON fields](analysis.md#read-saved-patches) for counts and unavailable evidence.
+JSON preserves source strings and field values independently of
 terminal presentation. It is the stable interface for scripts; human columns,
 wrapping, and labels can change.
 
@@ -496,13 +513,13 @@ NO_COLOR=1 ss update
 Cyan highlights counts and source paths; magenta marks diagnostic prefixes,
 tags, and functions; bright blue marks links and dates. Green denotes success
 or available content, while yellow marks unavailable or uncertain values. Fix ranges use red for old
-lines and green for new lines; failures are also red. Written labels carry
+lines and green for new lines; saved diffs use red for deletions and green for
+additions, with distinct file headers and hunk headings. Failures are also red. Written labels carry
 the same meaning when color is disabled.
 `NO_COLOR` removes styling but keeps interactive progress; use `--quiet` to
 hide progress entirely.
 
-Human output escapes source terminal-control characters. `--report` preserves
-report line breaks and tabs while escaping other controls. For original
+Human output escapes source terminal-control characters. For original
 evidence, use the stored source files/blobs described in the
 [database guide](database.md#where-each-field-comes-from).
 

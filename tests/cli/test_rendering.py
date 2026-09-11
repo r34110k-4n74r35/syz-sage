@@ -53,7 +53,7 @@ class CliRenderingTests(CliFixture, unittest.TestCase):
         }
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
-            _human_bug(bug, include_report=False, include_stack=True)
+            _human_bug(bug, include_stack=True)
 
         rendered = stdout.getvalue()
         content = compact(rendered)
@@ -214,7 +214,6 @@ class CliRenderingTests(CliFixture, unittest.TestCase):
                     "fixes": fixes,
                     "fix_locations": locations,
                 },
-                include_report=False,
             )
         rendered = stdout.getvalue()
         self.assertEqual(rendered.count("Fixes (2)"), 1)
@@ -241,7 +240,7 @@ class CliRenderingTests(CliFixture, unittest.TestCase):
 
         with contextlib.redirect_stdout(stdout):
             _human_list([bug])
-            _human_bug(bug, include_report=True)
+            _human_bug(bug)
 
         rendered = stdout.getvalue()
         self.assertNotIn("\x1b", rendered)
@@ -250,7 +249,8 @@ class CliRenderingTests(CliFixture, unittest.TestCase):
         self.assertNotIn("\u202e", rendered)
         self.assertIn(r"\x1b", rendered)
         self.assertIn(r"\u202e", rendered)
-        self.assertIn("line one\nline two", rendered)
+        self.assertNotIn("line one", rendered)
+        self.assertNotIn("Full representative report", rendered)
 
     def test_human_show_does_not_call_an_unavailable_report_available(self) -> None:
         stdout = io.StringIO()
@@ -263,7 +263,7 @@ class CliRenderingTests(CliFixture, unittest.TestCase):
         }
 
         with contextlib.redirect_stdout(stdout):
-            _human_bug(bug, include_report=False)
+            _human_bug(bug)
 
         self.assertIn("Representative report: unavailable", compact(stdout.getvalue()))
 

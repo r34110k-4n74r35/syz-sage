@@ -10,7 +10,7 @@ from unittest import mock
 
 from syz_sage.analysis.evidence import build_explanation
 from syz_sage.cli import main
-from syz_sage.cli.presentation.evidence import human_explanation, human_patch
+from syz_sage.cli.presentation.evidence import human_explanation, human_patch, human_patches
 from tests.cli.support import CliFixture, compact, invoke
 from tests.support import ALPHA_HASH
 
@@ -77,6 +77,56 @@ class EvidenceDisplayTests(unittest.TestCase):
         self.assertIn("No retained patch text", output)
         self.assertIn("not recorded", output)
         self.assertNotIn("\nDiff\n", output)
+
+    def test_diffstat_colors_counts_preserves_paths_and_marks_unknown_counts(self):
+        value = self.patch()
+        value["files"] = [
+            {
+                "old_file_path": "old name.c",
+                "new_file_path": "new name.c",
+                "insertions": 3,
+                "deletions": 2,
+                "kind": "text",
+            },
+            {
+                "old_file_path": "blob\x1b[2J.bin",
+                "new_file_path": "blob\x1b[2J.bin",
+                "insertions": None,
+                "deletions": None,
+                "kind": "binary",
+            },
+        ]
+        value["diffstat"] = {
+            "files_changed": 2,
+            "insertions": None,
+            "deletions": None,
+            "complete": False,
+        }
+        for width in (24, 110):
+            with self.subTest(width=width):
+                plain = self.render(human_patches, [value], width=width)
+                colored = self.render(human_patches, [value], tty=True, width=width)
+                self.assertTrue(plain.lstrip().startswith("Diffstat\n"))
+                self.assertEqual(ANSI.sub("", colored), plain)
+                self.assertIn("\x1b[32m+3", colored)
+                self.assertIn("\x1b[31m-2", colored)
+                self.assertIn("old name.c -> new name.c", compact(plain))
+                self.assertIn("binary (line counts unknown)", plain)
+                self.assertIn("total line counts unknown", compact(plain))
+                self.assertIn(r"blob\x1b[2J.bin", plain)
+                self.assertNotIn("\x1b[2J", colored)
+                self.assertEqual(
+                    self.render(
+                        human_patches, [value], tty=True, width=width, environment={"NO_COLOR": ""}
+                    ),
+                    plain,
+                )
+
+    def test_no_fix_references_does_not_render_an_empty_patch(self):
+        output = self.render(human_patches, [])
+        self.assertNotIn("Fix patches", output)
+        self.assertIn("No fix references", output)
+        self.assertNotIn("Saved patch", output)
 
     def test_explanation_colors_and_unknown_evidence_remain_readable(self):
         value = build_explanation(

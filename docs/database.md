@@ -260,8 +260,13 @@ available. Unwind dumps are retained in their own section. KMSAN's
 These auxiliary traces, other-task backtraces, and unwind dumps cannot supply
 a missing crash coordinate. Unsymbolized frames
 keep their raw text and unknown fields. The
-complete report text remains the source of truth for unusual formats and is
-available through `ss show KEY --report` or JSON with `--report`.
+complete report text remains the source of truth for unusual formats. The bytes
+remain stored in `blobs` through `reports` / `report_versions`, with downloaded
+files under `artifacts/reports/KEY.txt` beneath the selected data root.
+`ss show KEY --stack` displays all indexed frames; `ss show KEY --json` includes
+report metadata and the extracted stack but always omits full report text.
+Use `ss fetch KEY --report` (optionally with `--crash N`) to explicitly download
+a selected crash report; see [selective downloads](analysis.md#fetch-additional-evidence-for-one-crash).
 
 Fix coordinates refer to the patch's old tree and new tree. `old_start` with
 `old_count` describes removed lines; `new_start` with `new_count` describes

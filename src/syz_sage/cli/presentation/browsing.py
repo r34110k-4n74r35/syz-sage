@@ -151,7 +151,7 @@ def human_filter(value: dict[str, Any], *, query: str | None = None) -> None:
             "or replace --limit with --all.",
             tone="muted",
         )
-    paragraph("Full report or stack: ss show KEY --report --stack", tone="muted")
+    paragraph("Full stack and patches: ss show KEY --stack --diff", tone="muted")
 
 
 def human_filter_values(value: dict[str, Any]) -> None:

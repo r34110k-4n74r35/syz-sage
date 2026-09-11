@@ -158,9 +158,10 @@ class HelpTests(unittest.TestCase):
         self.assertFalse(update.quiet)
         listing = parser.parse_args(["list"])
         self.assertEqual((listing.limit, listing.offset), (20, 0))
-        show = parser.parse_args(["show", "extid-alpha123", "--report", "--stack", "--json"])
+        show = parser.parse_args(["show", "extid-alpha123", "--stack", "--json"])
         self.assertEqual(show.key, "extid-alpha123")
-        self.assertTrue(show.report and show.stack and show.json)
+        self.assertTrue(show.stack and show.json)
+        self.assertFalse(hasattr(show, "report"))
         filtering = parser.parse_args(
             [
                 "filter",
@@ -181,6 +182,16 @@ class HelpTests(unittest.TestCase):
         self.assertEqual(filtering.bug_types, ["kasan", "kmsan", "warning"])
         self.assertEqual(filtering.subsystems, ["fs", "mm", "net"])
         self.assertTrue(filtering.all and filtering.urls_only)
+
+    def test_report_option_is_rejected_for_show_and_remains_available_for_fetch(self) -> None:
+        code, stdout, stderr = self.render(["show", "extid-alpha123", "--report"])
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("unrecognized arguments: --report", stderr)
+        _, help_text, _ = self.render(["show", "--help"])
+        self.assertNotIn("--report", help_text)
+        fetch = _parser().parse_args(["fetch", "extid-alpha123", "--report"])
+        self.assertTrue(fetch.report)
 
 
 if __name__ == "__main__":

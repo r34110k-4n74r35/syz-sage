@@ -143,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     show = commands.add_parser(
         "show",
-        help="inspect one bug, its locations, and crash stack",
+        help="inspect one bug, its locations, crash stack, and fix patches",
         description=(
             "Read one bug from the active SQLite snapshot, including subsystem tags, "
             "crash locations, and changed fix lines. Bug URLs are looked up locally."
@@ -152,8 +152,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  ss show extid-0a884bc2d304ce4af70f\n"
             "  ss show extid-0a884bc2d304ce4af70f --stack\n"
-            "  ss show extid-0a884bc2d304ce4af70f --json --report\n\n"
-            "JSON always includes the extracted stack. Report text requires --report."
+            "  ss show extid-0a884bc2d304ce4af70f --stack --diff\n"
+            "  ss show extid-0a884bc2d304ce4af70f --json\n\n"
+            "JSON always includes the extracted stack. All saved patch bodies require --diff."
         ),
     )
     show.add_argument("key", metavar="KEY_OR_URL", help="extid-* / id-* key or syzbot /bug URL")
@@ -163,12 +164,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="display all extracted representative-report frames",
     )
-    content.add_argument(
-        "--report",
+    patches = content.add_mutually_exclusive_group()
+    patches.add_argument(
+        "--diff",
         action="store_true",
-        help="include the full representative crash report",
+        help="include all saved fix patches with per-file diffstat; combines with --stack",
     )
-    content.add_argument(
+    patches.add_argument(
         "--patch", metavar="HASH", help="display the saved diff for this fix commit"
     )
     content.add_argument(
