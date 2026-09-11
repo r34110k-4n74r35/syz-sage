@@ -211,7 +211,7 @@ class CharacteristicFilterTests(DatabaseFixture, unittest.TestCase):
             self.assertEqual(rows[0]["fixes"][0]["hash"], ALPHA_HASH)
             self.assertEqual(rows[0]["crash_locations"][0]["file_path"], "net/alpha.c")
             self.assertTrue(rows[0]["fix_locations"])
-            self.assertNotIn("report", rows[0])
+            self.assertNotIn("text", rows[0]["report"])
             self.assertFalse(any("SELECT content FROM blobs" in query for query in statements))
 
     def test_invalid_filter_arguments_are_rejected(self) -> None:

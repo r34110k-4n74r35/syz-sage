@@ -29,6 +29,7 @@ Only package metadata and `__main__.py` remain at the source package root.
 |---|---|
 | CLI dispatch, paths, JSON output, and exit codes | [cli/commands.py](../src/syz_sage/cli/commands.py) |
 | Argument definitions and validation | [cli/arguments.py](../src/syz_sage/cli/arguments.py), [cli/research_arguments.py](../src/syz_sage/cli/research_arguments.py), [cli/help.py](../src/syz_sage/cli/help.py) |
+| Filter result sections and shared show/filter source formatting | [cli/presentation/filter_detail.py](../src/syz_sage/cli/presentation/filter_detail.py), [cli/presentation/locations.py](../src/syz_sage/cli/presentation/locations.py) |
 | Update orchestration and download selection | [retrieval/sync.py](../src/syz_sage/retrieval/sync.py) |
 | Update options, listing scope, and result contracts | [retrieval/models.py](../src/syz_sage/retrieval/models.py) |
 | Retained listing comparison and catalog generation | [retrieval/catalog.py](../src/syz_sage/retrieval/catalog.py) |

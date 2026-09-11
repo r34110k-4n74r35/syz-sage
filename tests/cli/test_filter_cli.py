@@ -139,12 +139,59 @@ class FilterCliTests(unittest.TestCase):
             "Saved status: fixed",
             "Crashes: 1",
             "Fixes: 1",
+            "Timeline",
+            "First crash: 2026/07/01 09:00",
+            "Last crash: 2026/07/03 09:00",
+            "Fix time: 2026/08/01 12:00",
+            "Close time: 2026/08/01 12:00",
+            "Crash locations · representative report (1)",
+            "net/alpha.c:42",
+            "Function: alpha_read",
+            "Role: primary",
+            "Confidence: low",
+            "Method: first non-runtime manifestation frame",
+            "Kernel commit: " + "c" * 40,
+            "Fix commits (1)",
+            "net: fix alpha lifetime",
+            "Commit: " + "a" * 40,
+            "Repository: git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git",
+            "Patch: available",
+            "inferred from definition context",
+            "old after line 2 -> new 3",
             "Representative report: available",
+            "Stack: 1 extracted frame",
+            "https://syzkaller.appspot.com/text?tag=CrashReport&x=alpha",
             "--offset 1",
             "ss show KEY",
         ):
             self.assertIn(content, compact)
         self.assertNotIn("\x1b", output)
+
+    def test_filter_json_details_match_show_without_raw_report_or_stack(self) -> None:
+        code, output, error = self.run_filter("--limit", "1", "--json")
+        self.assertEqual(code, 0, error)
+        row = json.loads(output)["bugs"][0]
+        code, output, error = invoke(
+            ["--database", str(self.database), "show", row["key"], "--stack", "--json"]
+        )
+        self.assertEqual(code, 0, error)
+        detail = json.loads(output)
+        for name in (
+            "first_crash",
+            "last_crash",
+            "fix_time",
+            "close_time",
+            "fixes",
+            "crash_locations",
+            "fix_locations",
+            "report",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(row[name], detail[name])
+        self.assertEqual(row["crash_stack_count"], len(detail["crash_stack"]))
+        self.assertNotIn("text", row["report"])
+        self.assertNotIn("raw", row)
+        self.assertNotIn("crash_stack", row)
 
     def test_urls_only_is_uncolored_complete_lines_even_on_a_terminal(self) -> None:
         code, output, error = self.run_filter("--all", "--urls-only", tty=True)
@@ -171,7 +218,6 @@ class FilterCliTests(unittest.TestCase):
         )
         code, output, error = self.run_filter("--query", "alpha")
         self.assertEqual(code, 0, error)
-        self.assertIn("Patch / commit URLs:", output)
         self.assertIn("C reproducer: available (URL recorded)", " ".join(output.split()))
         for url in [*bug["patch_urls"], *bug["c_reproducer_urls"]]:
             self.assertIn(url, [line.strip() for line in output.splitlines()])
@@ -188,6 +234,11 @@ class FilterCliTests(unittest.TestCase):
         compact = " ".join(output.split())
         self.assertIn("Patch / commit URLs: not recorded", compact)
         self.assertIn("C reproducer: not provided in saved crash metadata", compact)
+        self.assertIn("Unknown; no crash site could be indexed.", compact)
+        self.assertIn("Commit: unresolved (title only)", compact)
+        self.assertIn("Changed locations unknown.", compact)
+        self.assertIn("Representative report: unavailable", compact)
+        self.assertIn("Stack: 0 extracted frames", compact)
 
     def test_no_matches_json_and_human_are_successful(self) -> None:
         code, output, error = self.run_filter("--subsystem", "nonexistent", "--json")

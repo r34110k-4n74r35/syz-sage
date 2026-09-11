@@ -59,6 +59,12 @@ pagination, `--all`, `--json`, and `--urls-only` options remain available.
 `--list-values` must be used without selection or pagination; it now also lists
 observed families and access modes.
 
+Each result includes its timeline, representative crash coordinates, fix commits
+and changed source ranges, report URL/size, and stack-frame count. Colors distinguish
+source paths, functions, hashes, dates, and evidence availability. Use `--limit 5`
+for a shorter page or `--json` for the structured details. See the
+[filter output reference](usage.md#filter-fixed-bugs) for field definitions.
+
 Patch-size filters count each known fix hash once. Renames use the new path,
 deletions the old path. Sizes are unknown when required fixes are unresolved,
 patches are missing, or their contents are binary or incompletely parsed. Those

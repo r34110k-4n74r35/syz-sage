@@ -165,10 +165,29 @@ titles are `other`. A manager boot/test wrapper is handled separately from the
 underlying diagnostic. This is a derived title classification, not a root-cause
 or vulnerability classification. See [bug type provenance](database.md#bug-types).
 
-The human display includes each full title and URL, bug key, stored type, all
-subsystem tags, saved status, crash/fix counts, and representative-report availability.
-Each result also includes all distinct recorded patch links and C reproducer
-URLs, printed in full for copying. Patch links prefer the saved download source;
+The human display groups each result into readable sections:
+
+- **Summary:** full title and bug URL, key, diagnostic type, failure pattern,
+  access mode, all subsystem tags, saved status, crash/fix counts, and known
+  changed-file/line totals.
+- **Timeline:** first and last crash, fix time, and close time when recorded.
+- **Crash locations:** files, lines/columns, functions, roles, extraction confidence
+  and method, and kernel commit from the representative report's build.
+- **Fix commits:** full titles and hashes, repositories, commit links, saved patch
+  availability, and each commit's changed files/functions and old/new line ranges.
+  Function inference is labeled; unresolved commits and missing locations are explicit.
+- **Saved evidence:** representative-report availability, byte size and URL,
+  extracted stack-frame count, patch links, and C reproducer availability and URLs.
+
+Source locations use the same formatting and interpretation as `ss show`.
+The stack count describes the representative report; the crash count covers all
+saved crash entries. Full report text and stacks remain available through
+`ss show KEY --report --stack`. No sections or source ranges are truncated;
+use `--limit 5` to browse a smaller page.
+
+All distinct recorded patch links and C reproducer URLs remain visible in full
+for copying. A patch URL already printed under its fix is not repeated in the
+evidence section. Patch links prefer the saved download source;
 when that is unavailable, they use the saved fix commit link. A patch link may
 therefore open a commit page instead of a raw diff. No URL is guessed from a hash.
 Missing patch links are marked as not recorded. C reproducer availability uses
@@ -190,16 +209,21 @@ must be non-negative. `--all` returns every match after the offset and cannot
 be combined with an explicit `--limit`. JSON includes `bugs`, the pre-pagination
 `total`, `limit` (`null` with `--all`), `offset`, `bug_types`, and `subsystems`.
 Each bug includes `key`, `title`, `bug_url`, `bug_type`, tags, and summary fields,
-plus `patch_urls`, `c_reproducer_status`, and `c_reproducer_urls`. URL arrays are
-empty when no usable links were recorded. Existing indexed data needs no
-migration or re-import for these additional fields.
+plus `patch_urls`, `c_reproducer_status`, and `c_reproducer_urls`. Details include
+`first_crash`, `last_crash`, `fix_time`, `close_time`, `fixes`, `crash_locations`,
+`fix_locations`, `report`, and `crash_stack_count`. The original `first_crash_at`
+and `last_crash_at` keys remain as aliases. `report` is either null or contains
+`available`, `size`, `source_url`, and `sha256`; no report body, raw bug JSON, or
+full stack is included. URL arrays are empty when no usable links were recorded.
+These display additions require no schema change or re-import on schema 7.
 `--urls-only` prints one complete **bug URL** per line with no heading or color;
 use `--json` to export patch and reproducer URLs too. Both
 output formats respect pagination; add `--all` to export the whole selection.
 JSON and URL-only modes are mutually exclusive. No matches is a successful
 empty result; URL-only mode prints nothing.
 
-Filtering reads SQLite only. It does not retrieve bugs, download artifacts,
+Filtering reads SQLite only and loads details for the selected page in batches.
+It does not retrieve bugs, download artifacts,
 create export files on its own, or migrate a database during inspection. Run
 `ss migrate` once if an older database reports that schema migration is needed.
 

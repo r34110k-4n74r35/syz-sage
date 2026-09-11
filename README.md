@@ -66,9 +66,11 @@ ss filter --list-values
 ss filter --type warning --subsystem mm --all --urls-only
 ```
 
-Results include titles, bug URLs, patch links, C reproducer URLs and availability,
-types, tags, and crash/fix/report summaries. Links come from saved metadata;
-filtering does not download files.
+Results include titles, bug URLs, types, tags, timelines, crash source locations,
+and fix commits with changed files/functions and line ranges. Report availability,
+size, stack-frame counts, patch links, and C reproducer URLs are included too.
+Details are grouped into colored sections on a terminal; use `--limit 5` for a
+shorter page. All information comes from saved data; filtering does not download files.
 Filters are case-insensitive: multiple values within a category match any of
 those values, and the type and subsystem categories must both match. Tags are
 exact syzbot labels; `fs` does not automatically include `ext4` or `btrfs`.

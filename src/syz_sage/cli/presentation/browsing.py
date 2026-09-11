@@ -6,7 +6,8 @@ import textwrap
 from typing import Any
 
 from ..terminal import paragraph, safe_text, section, style, terminal_width
-from .common import bug_type_label, c_reproducer_label, fields, title_colors
+from .common import bug_type_label, fields, title_colors
+from .filter_detail import filter_details
 
 
 def human_list(rows: list[dict[str, Any]], *, offset: int = 0) -> None:
@@ -67,7 +68,7 @@ def human_list(rows: list[dict[str, Any]], *, offset: int = 0) -> None:
 
 
 def human_filter(value: dict[str, Any], *, query: str | None = None) -> None:
-    """Show full titles and URLs, keeping pagination separate from match counts."""
+    """Show bug details and evidence, keeping pagination separate from match counts."""
     rows = value["bugs"]
     total, offset = value["total"], value["offset"]
     paragraph(f"Matching fixed bugs ({total:,})", tone="heading")
@@ -128,7 +129,6 @@ def human_filter(value: dict[str, Any], *, query: str | None = None) -> None:
                 ("Saved status", row.get("status") or "unknown"),
                 ("Crashes", f"{row.get('crash_count', 0):,}"),
                 ("Fixes", f"{row.get('fix_count', 0):,}"),
-                ("Representative report", "available" if row.get("has_report") else "unavailable"),
                 (
                     "Changed files",
                     row.get("fix_file_count")
@@ -143,16 +143,7 @@ def human_filter(value: dict[str, Any], *, query: str | None = None) -> None:
                 ),
             ]
         )
-        patch_urls = row.get("patch_urls", [])
-        if patch_urls:
-            paragraph("Patch / commit URLs:", indent=2, tone="muted")
-            for url in patch_urls:
-                paragraph(url, indent=4, tone="link")
-        else:
-            fields([("Patch / commit URLs", "not recorded")])
-        fields([("C reproducer", c_reproducer_label(row.get("c_reproducer_status")))])
-        for url in row.get("c_reproducer_urls", []):
-            paragraph(url, indent=4, tone="link")
+        filter_details(row)
     print()
     if offset + len(rows) < total:
         paragraph(
@@ -160,7 +151,7 @@ def human_filter(value: dict[str, Any], *, query: str | None = None) -> None:
             "or replace --limit with --all.",
             tone="muted",
         )
-    paragraph("Inspect a result: ss show KEY", tone="muted")
+    paragraph("Full report or stack: ss show KEY --report --stack", tone="muted")
 
 
 def human_filter_values(value: dict[str, Any]) -> None:

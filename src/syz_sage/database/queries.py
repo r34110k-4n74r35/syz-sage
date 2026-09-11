@@ -604,7 +604,6 @@ def _list_filtered_rows(
         SELECT
             c.bug_id, c.bug_version_id, c.snapshot_id,
             c.key, c.title, c.bug_type, c.status, c.bug_url,
-            c.raw_sha256, bv.payload_kind,
             ch.family,ch.access_mode,ch.evidence_json,
             ch.c_reproducer_status,ch.c_reproducer_urls_json,
             pm.has_patch,pm.fix_file_count,pm.patch_line_count,
@@ -618,7 +617,6 @@ def _list_filtered_rows(
                   AND rv.is_valid = 1
             ) AS has_report
         FROM current_bug_rows AS c
-        JOIN bug_versions AS bv ON bv.id = c.bug_version_id
         JOIN snapshot_bug_characteristics ch ON ch.snapshot_id=c.snapshot_id AND ch.bug_id=c.bug_id
         JOIN current_bug_patch_metrics pm ON pm.bug_id=c.bug_id
         {where}
@@ -628,65 +626,88 @@ def _list_filtered_rows(
         parameters,
     ).fetchall()
     result: list[dict[str, Any]] = []
-    batch_fixes: dict[int, list[dict[str, Any]]] = {}
-    batch_tags: dict[int, list[str]] = {}
-    if len(rows) > 1:
-        ids = [int(row["bug_id"]) for row in rows]
-        for start in range(0, len(ids), 500):
-            selected = ids[start : start + 500]
-            batch_fixes.update(_current_effective_fixes(database, selected))
-            for tag in database.connection.execute(
-                "SELECT bug_id,tag FROM current_bug_subsystems WHERE bug_id IN ("
-                + ",".join("?" for _ in selected)
-                + ") ORDER BY tag",
-                selected,
-            ):
-                batch_tags.setdefault(int(tag[0]), []).append(tag[1])
+    evidence = _filtered_evidence(database, [int(row["bug_id"]) for row in rows])
     for row in rows:
         item = dict(row)
         item.update(characteristics.fields(item))
         item.pop("evidence_json")
         item["has_patch"] = bool(item["has_patch"])
         bug_id = int(item.pop("bug_id"))
-        version_id = int(item.pop("bug_version_id"))
-        snapshot_id = int(item.pop("snapshot_id"))
-        fixes = (
-            batch_fixes.get(bug_id, [])
-            if len(rows) > 1
-            else database._effective_fixes(
-                bug_id=bug_id,
-                version_id=version_id,
-                snapshot_id=snapshot_id,
-            )
-        )
+        item.pop("bug_version_id")
+        item.pop("snapshot_id")
+        item.update(evidence[bug_id])
+        fixes = item["fixes"]
         item["fix_count"] = len(fixes)
         item["patch_urls"] = _patch_urls(fixes)
-        repro_urls = item.pop("c_reproducer_urls_json")
-        if len(rows) > 1:
-            item["c_reproducer_urls"] = json.loads(repro_urls)
-            item.pop("raw_sha256")
-            item.pop("payload_kind")
-        else:
-            item.update(
-                _c_reproducer_fields(
-                    database._load_json_blob(item.pop("raw_sha256")),
-                    item.pop("payload_kind"),
-                    _dashboard_from_bug_url(item["bug_url"]),
-                )
-            )
+        item["c_reproducer_urls"] = json.loads(item.pop("c_reproducer_urls_json"))
         item["has_report"] = bool(item["has_report"])
-        item["subsystems"] = (
-            batch_tags.get(bug_id, [])
-            if len(rows) > 1
-            else [
-                tag[0]
-                for tag in database.connection.execute(
-                    "SELECT tag FROM current_bug_subsystems WHERE bug_id = ? ORDER BY tag",
-                    (bug_id,),
-                )
-            ]
-        )
+        item["first_crash"] = item["first_crash_at"]
+        item["last_crash"] = item["last_crash_at"]
         result.append(item)
+    return result
+
+
+def _filtered_evidence(database: Database, bug_ids: Sequence[int]) -> dict[int, dict[str, Any]]:
+    """Enrich only the selected page, without reading blob or full-stack content."""
+    result: dict[int, dict[str, Any]] = {}
+    for start in range(0, len(bug_ids), 500):
+        selected = bug_ids[start : start + 500]
+        placeholders = ",".join("?" for _ in selected)
+        fixes = _current_effective_fixes(database, selected)
+        for bug_id in selected:
+            result[bug_id] = {
+                "fixes": fixes.get(bug_id, []),
+                "subsystems": [],
+                "crash_locations": [],
+                "fix_locations": [],
+                "report": None,
+                "crash_stack_count": 0,
+            }
+        for tag in database.connection.execute(
+            f"SELECT bug_id,tag FROM current_bug_subsystems WHERE bug_id IN ({placeholders}) "
+            "ORDER BY tag",
+            selected,
+        ):
+            result[int(tag[0])]["subsystems"].append(tag[1])
+        for field, view, order in (
+            ("crash_locations", "current_crash_locations", "ordinal"),
+            ("fix_locations", "current_fix_locations", "commit_hash,repo,ordinal"),
+        ):
+            for raw in database.connection.execute(
+                f"SELECT * FROM {view} WHERE bug_id IN ({placeholders}) ORDER BY {order}",
+                selected,
+            ):
+                item = dict(raw)
+                bug_id = int(item.pop("bug_id"))
+                item.pop("key", None)
+                item.pop("title", None)
+                result[bug_id][field].append(item)
+        for raw in database.connection.execute(
+            f"""SELECT c.bug_id, COALESCE(sr.source_url,'') AS source_url,
+                       rv.blob_sha256 AS sha256, COALESCE(b.size_bytes,0) AS size,
+                       b.sha256 IS NOT NULL AS available
+                FROM current_bug_rows c JOIN reports r ON r.bug_id=c.bug_id
+                LEFT JOIN snapshot_reports sr
+                  ON sr.snapshot_id=c.snapshot_id AND sr.bug_id=c.bug_id
+                LEFT JOIN report_versions rv ON rv.id=sr.report_version_id AND rv.is_valid=1
+                LEFT JOIN blobs b ON b.sha256=rv.blob_sha256
+                WHERE c.bug_id IN ({placeholders})""",
+            selected,
+        ):
+            item = dict(raw)
+            bug_id = int(item.pop("bug_id"))
+            item["available"] = bool(item["available"])
+            result[bug_id]["report"] = item
+        for row in database.connection.execute(
+            f"""SELECT c.bug_id,COUNT(*) AS amount
+                FROM current_bug_rows c JOIN snapshot_reports sr
+                  ON sr.snapshot_id=c.snapshot_id AND sr.bug_id=c.bug_id
+                JOIN report_versions rv ON rv.id=sr.report_version_id AND rv.is_valid=1
+                JOIN crash_stack_frames f ON f.report_version_id=rv.id
+                WHERE c.bug_id IN ({placeholders}) GROUP BY c.bug_id""",
+            selected,
+        ):
+            result[int(row[0])]["crash_stack_count"] = int(row[1])
     return result
 
 
@@ -705,41 +726,7 @@ def _load_json_blob(database: Database, digest: str) -> Any:
 def research_rows(database: Database, **criteria: Any) -> list[dict[str, Any]]:
     """Select active bugs with lightweight fix/location evidence in bounded batches."""
     criteria.setdefault("limit", None)
-    database.initialize()
-    with database._read_transaction():
-        rows = database.filter_bugs(**criteria)["bugs"]
-        if not rows:
-            return []
-        by_key = {row["key"]: row for row in rows}
-        keys = list(by_key)
-        for start in range(0, len(keys), 500):
-            selected = keys[start : start + 500]
-            placeholders = ",".join("?" for _ in selected)
-            ids = {
-                int(row["bug_id"]): row["key"]
-                for row in database.connection.execute(
-                    f"SELECT bug_id,key FROM current_bug_rows WHERE key IN ({placeholders})",
-                    selected,
-                )
-            }
-            fixes = _current_effective_fixes(database, list(ids))
-            for bug_id, key in ids.items():
-                by_key[key]["fixes"] = fixes.get(bug_id, [])
-                by_key[key]["crash_locations"] = []
-                by_key[key]["fix_locations"] = []
-            for field, view, order in (
-                ("crash_locations", "current_crash_locations", "ordinal"),
-                ("fix_locations", "current_fix_locations", "commit_hash,repo,ordinal"),
-            ):
-                for raw in database.connection.execute(
-                    f"SELECT * FROM {view} WHERE key IN ({placeholders}) ORDER BY {order}", selected
-                ):
-                    item = dict(raw)
-                    key = item.pop("key")
-                    item.pop("title", None)
-                    item.pop("bug_id", None)
-                    by_key[key][field].append(item)
-        return rows
+    return database.filter_bugs(**criteria)["bugs"]
 
 
 def get_bug(database: Database, key: str) -> dict[str, Any] | None:

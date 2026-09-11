@@ -3,11 +3,12 @@ from __future__ import annotations
 import html
 import json
 import shutil
+import sqlite3
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from syz_sage.database import Database
+from syz_sage.database import Database, queries
 from syz_sage.project.storage import temporary_directory
 from tests.support import ALPHA_HASH, BETA_HASH, FIXTURES
 
@@ -105,25 +106,91 @@ class FilterDatabaseTests(unittest.TestCase):
     def test_page_count_and_enrichment_only_apply_to_selected_rows(self) -> None:
         with Database(self.path) as database:
             self.import_data(database)
+            selected_id = database.connection.execute(
+                "SELECT id FROM bugs WHERE key='id-gamma'"
+            ).fetchone()[0]
             with (
                 mock.patch.object(
-                    database, "_effective_fixes", wraps=database._effective_fixes
+                    queries, "_current_effective_fixes", wraps=queries._current_effective_fixes
                 ) as fixes,
                 mock.patch.object(
-                    database, "_load_json_blob", wraps=database._load_json_blob
-                ) as payloads,
+                    database, "_load_json_blob", side_effect=AssertionError("unexpected blob read")
+                ),
             ):
                 result = database.filter_bugs(bug_types=["kasan"], limit=1, offset=1)
             self.assertEqual(result["total"], 2)
             self.assertEqual((result["limit"], result["offset"]), (1, 1))
             self.assertEqual(self.keys(result), ["id-gamma"])
-            self.assertEqual(fixes.call_count, 1)
-            self.assertEqual(payloads.call_count, 1)
+            fixes.assert_called_once_with(database, [selected_id])
             all_remaining = database.filter_bugs(limit=None, offset=2)
             self.assertEqual(all_remaining["total"], 5)
             self.assertEqual(self.keys(all_remaining), ["id-gamma", "id-delta", "id-epsilon"])
             empty_page = database.filter_bugs(limit=0)
             self.assertEqual((empty_page["total"], empty_page["bugs"]), (5, []))
+
+    def test_filter_evidence_matches_show_for_single_and_multiple_rows(self) -> None:
+        with Database(self.path) as database:
+            self.import_data(database)
+            rows = database.filter_bugs()["bugs"]
+            for row in rows:
+                with self.subTest(key=row["key"]):
+                    self.assertEqual(database.filter_bugs(query=row["key"], limit=1)["bugs"], [row])
+                    shown = database.get_bug(row["key"])
+                    for field in (
+                        "fixes",
+                        "crash_locations",
+                        "fix_locations",
+                        "first_crash",
+                        "last_crash",
+                        "fix_time",
+                        "close_time",
+                        "patch_urls",
+                        "c_reproducer_urls",
+                    ):
+                        self.assertEqual(row[field], shown[field])
+                    report = shown["report"]
+                    self.assertEqual(
+                        row["report"],
+                        {key: value for key, value in report.items() if key != "text"}
+                        if report is not None
+                        else None,
+                    )
+                    self.assertEqual(row["crash_stack_count"], len(shown["crash_stack"]))
+                    self.assertNotIn("crash_stack", row)
+                    self.assertNotIn("raw", row)
+            self.assertGreater(rows[0]["crash_stack_count"], 0)
+            self.assertIsNone(rows[1]["report"])
+            self.assertEqual(rows[1]["crash_stack_count"], 0)
+
+    def test_filter_batches_evidence_without_loading_blobs_or_stack_text(self) -> None:
+        with Database(self.path) as database:
+            self.import_data(database)
+
+            def authorize(action: int, table: str, column: str, *_: object) -> int:
+                if action == sqlite3.SQLITE_READ and (table, column) in {
+                    ("blobs", "content"),
+                    ("crash_stack_frames", "raw_line"),
+                }:
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            counts = []
+            database.connection.set_authorizer(authorize)
+            try:
+                with mock.patch.object(
+                    database, "get_bug", side_effect=AssertionError("per-bug show query")
+                ):
+                    for limit in (1, 5):
+                        statements = []
+                        database.connection.set_trace_callback(statements.append)
+                        result = database.filter_bugs(limit=limit)
+                        self.assertEqual(len(result["bugs"]), limit)
+                        counts.append(len(statements))
+                    self.assertEqual(database.research_rows(limit=5), result["bugs"])
+            finally:
+                database.connection.set_trace_callback(None)
+                database.connection.set_authorizer(None)
+            self.assertEqual(counts[0], counts[1])
 
     def test_filter_values_count_distinct_bugs_for_case_variants(self) -> None:
         with Database(self.path) as database:
@@ -368,12 +435,23 @@ class FilterDatabaseTests(unittest.TestCase):
             payload["crashes"][0]["c-reproducer"] = "/text?tag=ReproC&x=new"
             path.write_text(json.dumps(payload))
             patch.write_bytes(patch.read_bytes() + b"\nnew patch version metadata\n")
+            report = self.data / "artifacts/reports/extid-alpha123.txt"
+            report.write_bytes(report.read_bytes() + b"\n extra_frame+0x1/0x2 net/new.c:99\n")
             partial = database.ingest_files(
                 self.data, errors=["planned partial"], source_urls={patch: new}
             )
             self.assertEqual(partial["status"], "partial", partial)
             after = database.filter_bugs()["bugs"][0]
-            for field in ("patch_urls", "c_reproducer_status", "c_reproducer_urls"):
+            for field in (
+                "patch_urls",
+                "c_reproducer_status",
+                "c_reproducer_urls",
+                "report",
+                "fixes",
+                "crash_locations",
+                "fix_locations",
+                "crash_stack_count",
+            ):
                 self.assertEqual(after[field], before[field])
             self.import_data(database)
             latest = database.filter_bugs()["bugs"][0]
