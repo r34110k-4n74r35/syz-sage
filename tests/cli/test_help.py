@@ -74,6 +74,8 @@ class HelpTests(unittest.TestCase):
         self.assertIn("default: 8", update)
         self.assertIn("Partial runs:", update)
         self.assertIn("--quiet", update)
+        self.assertIn("--recheck-fixes", update)
+        self.assertIn("ss update --recheck-fixes", update)
         _, show, _ = self.render(["show", "--help"])
         self.assertIn("KEY_OR_URL", show)
         self.assertIn("looked up locally", show)

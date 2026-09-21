@@ -18,6 +18,7 @@ from syz_sage.parsing.listing import (
 )
 
 ResolutionTargets = dict[str, set[tuple[str, str]]]
+PatchResolutions = dict[tuple[str, str, str], tuple[str, str | None]]
 _TAGS = re.compile(r"<[^>]+>")
 
 
@@ -64,14 +65,14 @@ def resolution_matches(
     return (title, repo) in targets.get(key, set())
 
 
-def resolution_patch_jobs(
+def load_patch_resolutions(
     path: Path,
     targets: ResolutionTargets,
     selected_keys: set[str],
     inventory: FileInventory | None = None,
     accepted: Sequence[Mapping[str, Any]] = (),
-) -> tuple[list[tuple[str, str | None]], list[dict[str, str]]]:
-    """Read current resolved hashes without treating retained history as live."""
+) -> tuple[PatchResolutions, list[dict[str, str]]]:
+    """Read current resolved hashes, preserving their bug/title/repository identity."""
 
     jobs = {
         resolution_identity(value): (
@@ -87,13 +88,13 @@ def resolution_patch_jobs(
             inventory.read_bytes(path) if inventory is not None else path.read_bytes()
         )
     except FileNotFoundError:
-        return list(jobs.values()), []
+        return jobs, []
     except (OSError, PayloadError) as exc:
-        return list(jobs.values()), [{"kind": "resolution-metadata", "key": "", "error": str(exc)}]
+        return jobs, [{"kind": "resolution-metadata", "key": "", "error": str(exc)}]
 
     values = document.get("resolutions")
     if not isinstance(values, list):
-        return list(jobs.values()), [
+        return jobs, [
             {
                 "kind": "resolution-metadata",
                 "key": "",
@@ -150,4 +151,46 @@ def resolution_patch_jobs(
             continue
         if key in selected_keys:
             jobs[resolution_identity(value)] = (hash_value.lower(), repo_value or None)
-    return list(jobs.values()), failures
+    return jobs, failures
+
+
+def unresolved_fix_keys(
+    records: Sequence[Mapping[str, Any]],
+    details: Mapping[str, Mapping[str, Any]],
+    resolutions: Mapping[tuple[str, str, str], tuple[str, str | None]],
+) -> set[str]:
+    """Find bugs that need another detail check to discover a usable fix hash.
+
+    Listing and cached detail data may name the same fix with and without a
+    hash. An unambiguous reported hash or a matching supplemental resolution
+    already supplies that reference; a missing patch file is retried separately.
+    """
+    missing: set[str] = set()
+    for record in records:
+        key = str(record["key"])
+        fixes = effective_fixes(record, details.get(key))
+        if not fixes:
+            missing.add(key)
+            continue
+        reported: dict[tuple[str, str], set[str]] = {}
+        for fix in fixes:
+            commit_hash = str(fix.get("hash") or "").lower()
+            if HASH_RE.fullmatch(commit_hash):
+                _, title, repo = resolution_identity(fix)
+                reported.setdefault((title, repo), set()).add(commit_hash)
+        for fix in fixes:
+            commit_hash = str(fix.get("hash") or "").lower()
+            if HASH_RE.fullmatch(commit_hash):
+                continue
+            if commit_hash:
+                # A malformed reference remains an indexing error even when
+                # another source supplies a valid hash for the same title.
+                missing.add(key)
+                break
+            _, title, repo = resolution_identity(fix)
+            if title and len(reported.get((title, repo), ())) == 1:
+                continue
+            if not title or (key, title, repo) not in resolutions:
+                missing.add(key)
+                break
+    return missing

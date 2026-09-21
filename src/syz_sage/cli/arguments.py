@@ -80,12 +80,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="check for new fixed bugs and index retained data",
         description=(
             "Check syzbot's upstream/fixed listing, fetch missing bug details, reports, "
-            "and patches, then update SQLite. Valid saved files are reused. Unchanged "
-            "data leaves the database untouched."
+            "and patches, then update SQLite. Reuse valid saved bug details; add "
+            "--recheck-fixes to look for newly published hashes for unresolved fixes. "
+            "Unchanged data leaves the database untouched."
         ),
         epilog=(
             "Examples:\n"
             "  ss update\n"
+            "  ss update --recheck-fixes\n"
             "  ss update --quiet\n"
             "  ss update --workers 4 --json\n\n"
             "Partial runs retain downloads and preserve any previous active snapshot. "
@@ -108,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     refresh = update.add_argument_group("Refresh saved files")
     refresh.add_argument(
+        "--recheck-fixes",
+        action="store_true",
+        help="recheck cached bugs with unresolved fix hashes for newly published patches",
+    )
+    refresh.add_argument(
         "--refresh-details",
         action="store_true",
         help="re-fetch selected bug JSON and its representative reports",
@@ -126,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     partial.add_argument(
         "--no-patches",
         action="store_true",
-        help="skip fix patches; keep candidate partial",
+        help="skip fix patches and --recheck-fixes checks; keep candidate partial",
     )
     partial.add_argument(
         "--allow-partial",

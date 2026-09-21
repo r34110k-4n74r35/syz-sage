@@ -102,6 +102,7 @@ not installed `syz_sage` modules or additional CLI subcommands. See the
 ss update
   -> discover and validate listing membership
   -> plan missing/invalid/retry/refresh download jobs
+       --recheck-fixes -> also recheck cached unresolved fix references
   -> fetch and validate with a bounded worker pool
   -> save each completion atomically; advance durable retry state
   -> compare retained content with the indexed snapshot
@@ -116,7 +117,10 @@ ss status / ss check -> read coverage or consistency results -> display or JSON
 ```
 
 `retrieval/sync.py` coordinates discovery, detail retrieval, report/patch retrieval, and
-candidate indexing as separate stages. `retrieval/artifacts.py` supplies the shared
+candidate indexing as separate stages. `UpdateOptions.recheck_fixes` defaults to
+false; only an explicit request adds detail checks solely to discover missing
+fix hashes. Pending retries and known-hash patch retrieval remain part of normal
+updates. `retrieval/artifacts.py` supplies the shared
 fetch/validate/save operations. `database/repository.py` reads retained evidence, preserves
 source bytes in content-addressed blobs, and decides whether a candidate can
 activate. Offline import also checks retry state so an unfinished refresh cannot
@@ -154,10 +158,20 @@ change wrapping or column alignment.
 `UpdatePlan` contains the validated listing and selected retrieval scope.
 `DownloadJob` identifies one detail/report/patch resource, its destination,
 optional source URL/repository, and selection reason: missing, invalid, retry,
-or explicit refresh. Workers return `ArtifactResult` with validated original
+or refresh. Workers return `ArtifactResult` with validated original
 bytes, a SHA-256 digest, the successful endpoint, and parsed detail JSON when
 applicable. The coordinator saves results and updates retry state; workers do
 not write SQLite.
+
+Before reusing cached details, patch-enabled updates check whether every
+effective fix reference has a usable hash. Listing/detail references are
+matched by normalized title and repository; matching supplemental resolutions
+also satisfy title-only references. Unresolved references, including bugs with
+no fix entries, trigger an automatic detail refresh within the selected scope.
+Known hashes with missing patches use the ordinary patch retry path instead.
+Automatic discovery refreshes a report only if its representative URL changes
+(normal missing/invalid/pending report checks still apply). Explicit detail
+refreshes and durable detail retries retain their report-refresh behavior.
 
 `bounded_results()` schedules at most twice the worker count at a time. Its
 consumer handles completed results before scheduling another batch, preventing

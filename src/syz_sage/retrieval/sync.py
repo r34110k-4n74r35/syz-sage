@@ -39,8 +39,12 @@ from .artifacts import (
 from .catalog import _listing_discrepancies, _read_prior_listing, write_catalog
 from .client import FetchError, SyzbotClient
 from .models import UpdateOptions, UpdatePlan, UpdateSummary
-from .resolutions import resolution_patch_jobs as _resolution_patch_jobs
-from .resolutions import resolution_targets
+from .resolutions import (
+    PatchResolutions,
+    load_patch_resolutions,
+    resolution_targets,
+    unresolved_fix_keys,
+)
 from .retry_state import SyncState as _SyncState
 from .retry_state import load_sync_state as _load_sync_state
 from .retry_state import save_sync_state as _write_sync_state
@@ -94,12 +98,14 @@ class Updater:
     ) -> None:
         emit_progress(self.on_progress, ProgressEvent(phase, message, completed, total))
 
-    def _phase_progress(self, label: str, total: int) -> Callable[[], None]:
+    def _phase_progress(
+        self, label: str, total: int, *, action: str = "downloading"
+    ) -> Callable[[], None]:
         """Report long batches without printing one line for every download."""
         completed = 0
         last_message = time.monotonic()
         phase = "download-" + label.lower().replace(" ", "-")
-        message = f"{label}: downloading {total:,}"
+        message = f"{label}: {action} {total:,}"
         if not total:
             message = f"{label}: no downloads needed"
         self._notify(phase, message, 0, total)
@@ -110,7 +116,7 @@ class Updater:
             self._notify(phase, message, completed, total)
             now = time.monotonic()
             if now - last_message >= 5 or (completed == total and total >= 20):
-                self.progress(f"{label}: processed {completed:,}/{total:,} downloads.")
+                self.progress(f"{label}: processed {completed:,}/{total:,} requests.")
                 last_message = now
 
         return advance
@@ -317,11 +323,12 @@ class Updater:
         pending: set[str],
         accept: Callable[[ArtifactResult], None],
         failed: Callable[[DownloadJob], None] | None = None,
+        action: str = "downloading",
     ) -> None:
         """Save validated completions and durably advance the existing retry queue."""
         pending.update(job.key for job in jobs)
         _write_sync_state(self.paths.sync_state, sync_state)
-        advance = self._phase_progress(label, len(jobs))
+        advance = self._phase_progress(label, len(jobs), action=action)
         completed = 0
         last_saved = time.monotonic()
 
@@ -384,6 +391,7 @@ class Updater:
         details: dict[str, dict[str, Any]] = {}
         refreshed: set[str] = set()
         jobs: list[DownloadJob] = []
+        saved: list[tuple[DownloadJob, bool, DownloadReason]] = []
         for index, record in enumerate(plan.records):
             self._notify("saved-details", "Checking saved bug details", index, len(plan.records))
             key = str(record["key"])
@@ -395,36 +403,79 @@ class Updater:
                 details[key] = local.detail
             if key not in selected_keys:
                 continue
+            saved.append((job, local is not None, reason))
+
+        discovery_keys: set[str] = set()
+        resolutions: PatchResolutions = {}
+        if options.recheck_fixes and options.patches and not options.refresh_details:
+            # Valid JSON can predate publication of a fix hash. Recheck only
+            # those incomplete references when explicitly requested.
+            discovery_keys = unresolved_fix_keys(plan.selected, details, {})
+            if discovery_keys:
+                unresolved_records = [
+                    record for record in plan.selected if str(record["key"]) in discovery_keys
+                ]
+                resolutions, _ = self._patch_resolutions(unresolved_records, details, inventory)
+                discovery_keys = unresolved_fix_keys(unresolved_records, details, resolutions)
+        discovery_jobs: set[str] = set()
+        for job, has_local, reason in saved:
+            key = job.key
             if options.refresh_details:
                 reason = "refresh"
             elif key in sync_state.pending_details:
                 reason = "retry"
-            elif local is not None:
+            elif has_local and key in discovery_keys:
+                reason = "refresh"
+                discovery_jobs.add(key)
+            elif has_local:
                 summary.details_reused += 1
                 continue
             jobs.append(replace(job, reason=reason))
 
+        planning_message = (
+            f"Saved bug details: {summary.details_reused:,} reused; "
+            f"{sum(job.reason in ('missing', 'invalid') for job in jobs):,} missing/invalid; "
+            f"{sum(job.reason == 'retry' for job in jobs):,} retries; "
+            f"{sum(job.reason == 'refresh' for job in jobs) - len(discovery_jobs):,} "
+            f"explicit refreshes; {len(discovery_jobs):,} fix rechecks"
+        )
         self._notify(
             "saved-details",
-            f"Saved bug details: {summary.details_reused:,} reused; {len(jobs):,} to download",
+            planning_message,
             len(plan.records),
             len(plan.records),
         )
+        self.progress(planning_message)
+        # Pending retries can also discover a late hash. Count all cached,
+        # unresolved requests, while retaining their original retry behavior.
+        recheck_keys = {job.key for job in jobs if job.key in details} & discovery_keys
+        accepted_detail_keys: set[str] = set()
 
         def accept(result: ArtifactResult) -> None:
             key = result.job.key
             assert result.detail is not None
+            previous = details.get(key)
             details[key] = result.detail
-            refreshed.add(key)
             summary.details_downloaded += 1
+            accepted_detail_keys.add(key)
             try:
                 report_url = first_report_url(result.detail, dashboard=self.client.dashboard)
             except PayloadError:
                 # Retain detail retry intent until report metadata is usable.
                 return
-            if report_url:
+            refresh_report = key not in discovery_jobs
+            if not refresh_report:
+                try:
+                    previous_url = first_report_url(previous or {}, dashboard=self.client.dashboard)
+                except PayloadError:
+                    refresh_report = True
+                else:
+                    refresh_report = previous_url != report_url
+            if refresh_report:
+                refreshed.add(key)
+            if report_url and refresh_report:
                 sync_state.pending_reports.add(key)
-            else:
+            elif not report_url:
                 sync_state.pending_reports.discard(key)
             sync_state.pending_details.discard(key)
 
@@ -432,9 +483,8 @@ class Updater:
             if job.key in details:
                 summary.details_reused += 1
 
-        self.progress(
-            f"Bug details: downloading {len(jobs):,}, reusing {summary.details_reused:,}."
-        )
+        action = "rechecking" if jobs and all(job.key in details for job in jobs) else "downloading"
+        self.progress(f"Bug details: {action} {len(jobs):,}.")
         self._download(
             jobs,
             options,
@@ -446,7 +496,24 @@ class Updater:
             pending=sync_state.pending_details,
             accept=accept,
             failed=failed,
+            action=action,
         )
+        if recheck_keys:
+            checked = recheck_keys & accepted_detail_keys
+            checked_records = [record for record in plan.selected if str(record["key"]) in checked]
+            # New title-only references can match resolutions that were not
+            # applicable to the old detail. Use the patch stage's current view.
+            if checked_records:
+                resolutions, _ = self._patch_resolutions(checked_records, details, inventory)
+            still_unresolved = unresolved_fix_keys(checked_records, details, resolutions)
+            outcome = (
+                f"Fix rechecks: {len(checked):,} checked; "
+                f"{len(checked - still_unresolved):,} resolved; "
+                f"{len(still_unresolved):,} awaiting hashes; "
+                f"{len(recheck_keys - checked):,} failed"
+            )
+            self._notify("fix-discovery-result", outcome)
+            self.progress(outcome)
         return details, refreshed
 
     def _index_candidate(
@@ -565,6 +632,25 @@ class Updater:
             accept=accept,
         )
 
+    def _patch_resolutions(
+        self,
+        records: list[dict[str, Any]],
+        details: Mapping[str, Mapping[str, Any]],
+        inventory: FileInventory,
+    ) -> tuple[PatchResolutions, list[dict[str, str]]]:
+        targets = resolution_targets(records, details)
+        accepted: list[dict[str, Any]] = []
+        if targets and self.database_path.is_file() and self.database_path.stat().st_size:
+            with contextlib.closing(Database(self.database_path, read_only=True)) as database:
+                accepted = database.accepted_resolutions(targets)
+        return load_patch_resolutions(
+            self.paths.resolutions,
+            targets,
+            {str(record["key"]) for record in records},
+            inventory,
+            accepted,
+        )
+
     def _fetch_patches(
         self,
         records: list[dict[str, Any]],
@@ -594,20 +680,9 @@ class Updater:
                             "error": f"invalid commit hash {commit_hash!r}",
                         }
                     )
-        targets = resolution_targets(records, details)
-        accepted: list[dict[str, Any]] = []
-        if self.database_path.is_file() and self.database_path.stat().st_size:
-            with contextlib.closing(Database(self.database_path, read_only=True)) as database:
-                accepted = database.accepted_resolutions(targets)
-        resolution_jobs, resolution_failures = _resolution_patch_jobs(
-            self.paths.resolutions,
-            targets,
-            {str(record["key"]) for record in records},
-            inventory,
-            accepted,
-        )
+        resolutions, resolution_failures = self._patch_resolutions(records, details, inventory)
         summary.failures.extend(resolution_failures)
-        for commit_hash, repo in resolution_jobs:
+        for commit_hash, repo in resolutions.values():
             _add_patch_job(references, commit_hash, repo)
         jobs: list[DownloadJob] = []
         for index, (commit_hash, repo) in enumerate(references.items()):

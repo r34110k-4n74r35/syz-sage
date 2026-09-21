@@ -100,9 +100,12 @@ Existing databases need `ss migrate` for the schema 7 classification fields.
 ## How updates and coverage work
 
 `ss update` checks the fixed-bug listing, reuses valid saved details and
-artifacts, and downloads new or missing content. An unchanged mirror leaves
-SQLite untouched. Existing metadata changes, repaired artifacts, and unfinished
-downloads can still require indexing even when no new bugs appear.
+artifacts, and downloads new or missing content. Use `ss update --recheck-fixes`
+to revisit cached bugs whose fixes still lack commit hashes and look for patches
+published later. Ordinary updates still retrieve patches for known hashes and
+resume unfinished downloads. An unchanged mirror leaves SQLite untouched.
+Existing metadata changes, repaired artifacts, and unfinished downloads can
+still require indexing even when no new bugs appear.
 
 Only a complete candidate becomes active. Failed or deliberately limited
 updates retain their downloads and preserve the previous complete snapshot;

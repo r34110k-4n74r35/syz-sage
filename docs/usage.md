@@ -250,15 +250,53 @@ An ordinary update proceeds as follows:
 1. Acquire the data-root lock and check the live `upstream/fixed` JSON/HTML.
 2. Compare the listing with the retained copy and save relevant listing changes.
 3. Retrieve missing or invalid bug detail JSON and pending detail retries.
+   Reuse other saved details, including bugs whose fix hashes are unresolved.
 4. Retrieve missing or invalid representative reports and fix patches, including
    new fix hashes and pending artifact retries.
 5. Compare retained content with SQLite, then skip unchanged ingestion or index
    a candidate snapshot. A complete candidate becomes active.
 
-Valid saved details are reused, including for bugs that reappear in the fixed
-listing. Changes to a listing title, subsystem tags, or fix references are
-indexed without automatically downloading that bug's detail JSON again. A new
-fix hash can require a new patch for an existing bug.
+Valid saved details are reused by default, including for bugs that reappear in
+the fixed listing. Changes to a listing title, subsystem tags,
+or known fix hashes are indexed without automatically downloading that bug's
+detail JSON again.
+
+An existing fixed bug can gain its patch later. Choose when to check unresolved
+fix metadata with:
+
+```console
+ss update --recheck-fixes
+```
+
+The two cases are handled as follows:
+
+- **Known commit hash, missing patch:** retry downloading the patch, even when
+  the bug and listing are unchanged.
+- **Title-only fix or no fix reference:** with `--recheck-fixes`, recheck that
+  bug's detail JSON to discover a newly published hash, then download its patch
+  and index it in SQLite. Without this flag, valid cached details are reused.
+  A matching hash in the listing, saved details, or an accepted supplemental
+  resolution already satisfies that fix reference.
+
+This also covers a bug with several fixes when only some references are
+resolved. The flag follows `--limit` and leaves complete bugs' details cached.
+A successful fix recheck reuses the saved crash report when its URL is unchanged; missing,
+invalid, or pending reports are still retrieved. If the recheck returns the
+same data, SQLite ingestion is skipped as usual. Failed detail checks preserve
+the cached copy and are retried on the next update. Existing pending downloads
+from failed or interrupted runs still resume without `--recheck-fixes`.
+
+Progress separates missing/invalid details, pending retries, explicit refreshes,
+and requested fix rechecks. The recheck result reports successfully checked
+bugs, resolved fix references, bugs still awaiting hashes, and failed requests.
+Here, **resolved** means the bug now has usable hashes for all its fix references;
+patch downloads are reported separately. The same unresolved count can appear
+on consecutive successful updates with `--recheck-fixes`: the latest response
+was saved, but it still lacks a hash. Ordinary updates skip those optional
+checks. Repeated checks that return identical content do not rewrite the detail
+file or update SQLite. The JSON
+`details_downloaded` counter counts successful detail responses, including
+unchanged rechecks; it is not a count of new or changed bugs.
 
 When the updater confirms that database ingestion can be skipped, the final
 result says it is up to date. The JSON result has `database.status: "unchanged"` and
@@ -277,11 +315,12 @@ indexed listing and subsystem tags are unchanged.
 | `--workers N` | Set concurrent network workers; default 8, minimum 1. |
 | `--quiet` | Hide progress and retain the final summary and issues. |
 | `--json` | Emit the structured summary without progress messages. |
+| `--recheck-fixes` | Recheck cached bugs with unresolved fix hashes and retrieve newly available patches; off by default. |
 | `--refresh-details` | Re-fetch selected bug JSON and its representative reports. |
-| `--refresh-artifacts` | Re-fetch reports and patches while reusing valid saved detail JSON. |
+| `--refresh-artifacts` | Re-fetch reports and patches using saved metadata; combine with `--recheck-fixes` to look for unresolved hashes too. |
 | `--limit N` | Select the first N listing entries; minimum 1, default all entries. |
 | `--no-reports` | Disable report retrieval and keep the candidate partial. |
-| `--no-patches` | Disable patch retrieval and keep the candidate partial. |
+| `--no-patches` | Disable patch retrieval and `--recheck-fixes` detail checks; keep the candidate partial. |
 | `--allow-partial` | Return success for a partial result without activating it. |
 
 Use the refresh flags when you explicitly want new versions of saved content:

@@ -97,13 +97,33 @@ class CliUpdateTests(CliFixture, unittest.TestCase):
             self.assertEqual(json.loads(stdout)["database"]["status"], "unchanged")
             self.assertTrue(json.loads(stdout)["database"]["skipped"])
             client.bug.assert_not_called()
+            self.assertEqual(json.loads(stdout)["details_downloaded"], 0)
+            self.assertEqual(json.loads(stdout)["details_reused"], 2)
             client.report.assert_not_called()
             client.patch.assert_not_called()
 
+            code, stdout, stderr = invoke(
+                ["--data-dir", str(data_dir), "update", "--recheck-fixes"]
+            )
+            self.assertEqual(code, 0, stderr or stdout)
+            client.bug.assert_called_once_with(
+                "https://syzkaller.appspot.com/bug?id=beta456&json=1"
+            )
+            self.assertIn("skipping SQLite update", stderr)
+            self.assertIn("1 fix rechecks", stderr)
+            self.assertIn("Bug details: rechecking 1", stderr)
+            self.assertIn(
+                "Fix rechecks: 1 checked; 0 resolved; 1 awaiting hashes; 0 failed",
+                stderr,
+            )
+            self.assertNotIn("updating SQLite from retained files", stderr)
+            self.assertIn("SQLite write skipped", stdout)
+
+            client.bug.reset_mock()
             code, stdout, stderr = invoke(["--data-dir", str(data_dir), "update"])
             self.assertEqual(code, 0, stderr or stdout)
-            self.assertIn("skipping SQLite update", stderr)
-            self.assertNotIn("updating SQLite from retained files", stderr)
+            client.bug.assert_not_called()
+            self.assertNotIn("Fix rechecks:", stderr)
             self.assertIn("SQLite write skipped", stdout)
 
     def test_human_update_reports_new_changed_removed_and_activation(self) -> None:

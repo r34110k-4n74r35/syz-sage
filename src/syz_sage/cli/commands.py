@@ -140,6 +140,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         limit=args.limit,
                         refresh_details=args.refresh_details,
                         refresh_artifacts=args.refresh_artifacts,
+                        recheck_fixes=args.recheck_fixes,
                         reports=not args.no_reports,
                         patches=not args.no_patches,
                     )

@@ -16,6 +16,7 @@ class UpdateOptions:
     reports: bool = True
     patches: bool = True
     limit: int | None = None
+    recheck_fixes: bool = False
 
 
 @dataclass(slots=True)
